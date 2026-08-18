@@ -1,0 +1,137 @@
+//! 두 도구가 공유하는 실행 로직 — 모드 분기, 출력, 종료 코드.
+
+use std::io::{IsTerminal, Write};
+use std::process::ExitCode;
+
+use anyhow::Result;
+
+use crate::cli::{self, Cli};
+use crate::meter::Snapshot;
+use crate::render::{self, plain};
+use crate::{FetchError, local_tz};
+
+/// 한 번 조회해 화면 표현을 만든다. 상주 모드에서는 워커 스레드가 반복 호출한다.
+pub type Fetch = Box<dyn Fn() -> Result<Snapshot, FetchError> + Send>;
+
+/// 조회기를 만든다. `tz` 는 각주 문구용이라 프로세스마다 한 번만 해석해 넘긴다.
+/// `live` 는 캐시를 건너뛸지 여부 (`--live`).
+pub type MakeFetch = fn(tz: String, live: bool) -> Fetch;
+
+pub fn main(prog: &'static str, about: &'static str, make_fetch: MakeFetch) -> ExitCode {
+    let args = Cli::parse_for(prog, about);
+    match run(prog, &args, make_fetch) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{prog}: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(prog: &'static str, args: &Cli, make_fetch: MakeFetch) -> Result<ExitCode> {
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    // 시간대 해석은 OS 호출이라 프로세스당 한 번만 한다
+    let tz = local_tz();
+    let fetch = make_fetch(tz.clone(), args.live);
+
+    if args.json {
+        let snap = fetch()?;
+        println!("{}", crate::render::to_json(&snap)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // 상주 모드는 TTY 에서만 의미가 있다. ratatui 는 alternate screen 을 쓰므로
+    // `watch` 아래나 파이프에서는 동작하지 않는다 — 그 경우 1회 출력으로 내려간다.
+    if args.is_watch() {
+        if stdout_is_tty {
+            if args.interval_was_clamped() {
+                eprintln!(
+                    "{prog}: 갱신 주기를 {}초로 올렸습니다 (원격 조회라 최소 {}초)",
+                    args.interval_secs(),
+                    cli::MIN_INTERVAL
+                );
+            }
+            render::tui::run(prog, args.interval_secs(), tz, fetch)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        eprintln!("{prog}: 출력이 터미널이 아니라 1회 출력합니다 (watch 와 함께 쓰세요)");
+    }
+
+    once(prog, args, stdout_is_tty, fetch)
+}
+
+fn once(prog: &str, args: &Cli, is_tty: bool, fetch: Fetch) -> Result<ExitCode> {
+    let color = render::use_color(args.no_color, is_tty);
+    let width = terminal_width();
+
+    let (text, ok) = once_output(prog, color, width, fetch());
+    write!(std::io::stdout().lock(), "{text}")?;
+    Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// 1회 출력의 본문과 성공 여부.
+///
+/// 실패도 **stdout** 으로 나간다. `watch` 는 stdout 만 캡처하므로
+/// stderr 로 보내면 오류가 났을 때 화면이 빈 채로 남는다.
+fn once_output(
+    prog: &str,
+    color: bool,
+    width: usize,
+    result: Result<Snapshot, FetchError>,
+) -> (String, bool) {
+    match result {
+        Ok(snap) => (plain::render(&snap, color, width), true),
+        Err(e) => (plain::render_error(prog, &e.to_string(), color), false),
+    }
+}
+
+fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meter::Level;
+
+    fn one() -> Snapshot {
+        Snapshot::live(vec![crate::meter::Meter {
+            title: "Current session".into(),
+            usage: crate::meter::Bar {
+                fill: 0.5,
+                label: "50% used".into(),
+                level: Level::Normal,
+            },
+            time: None,
+            footnote: Some("Resets Aug 18 at 9:30pm (Asia/Seoul)".into()),
+            emphasized: false,
+        }])
+    }
+
+    #[test]
+    fn success_renders_the_meters() {
+        let (text, ok) = once_output("ccmeter", false, 80, Ok(one()));
+        assert!(ok);
+        assert!(text.contains("Current session"));
+        assert!(text.contains("50% used"));
+    }
+
+    /// 어떤 실패든 본문(stdout)에 담겨야 한다.
+    /// stderr 로 새면 `watch` 화면이 빈 채로 남는다.
+    #[test]
+    fn every_failure_goes_into_the_body() {
+        let cases = [
+            FetchError::Unauthorized("재로그인 필요".into()),
+            FetchError::Other(anyhow::anyhow!("조회 요청이 너무 잦습니다 (HTTP 429)")),
+        ];
+        for err in cases {
+            let expect = err.to_string();
+            let (text, ok) = once_output("ccmeter", false, 80, Err(err));
+            assert!(!ok, "실패는 실패 코드여야 함");
+            assert!(text.contains(&expect), "본문에 사유가 있어야 함: {text}");
+            assert!(text.starts_with("ccmeter:"), "프로그램 이름으로 시작: {text}");
+        }
+    }
+}
