@@ -12,7 +12,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Gauge, Paragraph};
+use ratatui::widgets::{Gauge, Paragraph, Sparkline};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::meter::{Level, Meter, Origin, Snapshot};
@@ -24,10 +24,14 @@ const TICK: Duration = Duration::from_secs(1);
 /// 게이지·차트·각주가 제목 아래에서 들여쓰는 칸 수.
 const GAUGE_INDENT: u16 = 3;
 
+/// 1행으로는 8단계뿐이라 변화가 뭉개진다. 3행이면 터미널 블록의
+/// 세부 단계까지 합쳐 충분한 세로 해상도를 얻으면서 항목을 과하게 키우지 않는다.
+const HISTORY_CHART_HEIGHT: usize = 3;
+
 /// 한 항목이 차지하는 줄 수 — 제목·사용량은 항상, 나머지는 있을 때만.
 fn rows_for(m: &Meter, has_chart: bool) -> usize {
     2 + usize::from(m.time.is_some())
-        + usize::from(has_chart)
+        + if has_chart { HISTORY_CHART_HEIGHT } else { 0 }
         + usize::from(m.footnote.is_some())
         + 1 // 항목 사이 여백
 }
@@ -190,7 +194,7 @@ fn draw_meters(f: &mut Frame, area: Rect, app: &App) {
 
     // 차트 폭은 게이지와 같게 맞춘다 — 같은 창을 같은 축으로 보여주기 때문이다
     let chart_width = area.width.saturating_sub(GAUGE_INDENT) as usize;
-    let charts: Vec<Option<String>> = app
+    let charts: Vec<Option<Vec<Option<u64>>>> = app
         .meters
         .iter()
         .map(|m| {
@@ -224,7 +228,7 @@ fn draw_one(
     f: &mut Frame,
     slots: &[Rect],
     m: &Meter,
-    chart: Option<&str>,
+    chart: Option<&[Option<u64>]>,
     delta: Option<&str>,
 ) {
     let marker = if m.emphasized { "›" } else { " " };
@@ -259,14 +263,24 @@ fn draw_one(
 
     // 시계열 차트는 시간 게이지 바로 아래 — 가로축이 같아 세로로 맞춰 읽힌다
     if let Some(chart) = chart {
+        let first = slots[row];
+        let last = slots[row + HISTORY_CHART_HEIGHT - 1];
+        let chart_area = Rect {
+            x: first.x,
+            y: first.y,
+            width: first.width,
+            height: last.bottom().saturating_sub(first.y),
+        };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                chart,
-                Style::default().fg(Color::Indexed(109)),
-            ))),
-            indent(slots[row], GAUGE_INDENT),
+            Sparkline::default()
+                .data(chart.iter().copied())
+                .max(100)
+                .style(Style::default().fg(Color::Indexed(109)))
+                .absent_value_style(Style::default().fg(Color::DarkGray))
+                .absent_value_symbol("·"),
+            indent(chart_area, GAUGE_INDENT),
         );
-        row += 1;
+        row += HISTORY_CHART_HEIGHT;
     }
 
     if let Some(note) = &m.footnote {
@@ -423,9 +437,9 @@ mod tests {
         assert!(render(&app, 60, 20).contains("codexmeter"));
     }
 
-    /// 표본이 쌓이면 시계열 차트 줄이 생긴다.
+    /// 표본이 부족할 때는 빈 placeholder, 쌓이면 실제 sparkline 을 그린다.
     #[test]
-    fn draws_the_history_chart_once_samples_exist() {
+    fn draws_a_placeholder_then_the_history_chart() {
         let mut app = app_with(three());
         // 창 정보가 있어야 가로축을 잡을 수 있다
         let w = crate::meter::Window {
@@ -436,13 +450,22 @@ mod tests {
             m.window = Some(w);
         }
         let before = render(&app, 80, 30);
-        assert!(!before.contains('·'), "표본 전에는 차트가 없다");
+        let placeholder_cells = before.matches('·').count();
+        assert!(placeholder_cells > 0, "표본 전에도 빈 차트가 보여야 함:\n{before}");
 
         let now = Local::now();
         app.history.record(&app.meters.clone(), now - chrono::TimeDelta::minutes(2));
         app.history.record(&app.meters.clone(), now);
         let after = render(&app, 80, 30);
         assert!(after.contains('·'), "차트의 빈 구간이 보여야 함:\n{after}");
+        assert!(
+            after.matches('·').count() < placeholder_cells,
+            "실제 표본이 placeholder 일부를 대체해야 함:\n{after}"
+        );
+        assert!(
+            after.lines().filter(|line| line.contains('·')).count() >= 3,
+            "차트가 세 행 이상을 사용해야 함:\n{after}"
+        );
     }
 
     /// 화면이 짧아 다 못 그려도 패닉하지 않아야 한다.
@@ -471,4 +494,3 @@ mod tests {
         assert!(render(&app, 60, 20).contains("재인증 필요"));
     }
 }
-

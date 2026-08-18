@@ -9,12 +9,6 @@ use chrono::{DateTime, Local};
 
 use crate::meter::{Meter, Window};
 
-/// 차트 한 칸에 쓸 글자. 낮은 값부터 높은 값 순.
-const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-/// 표본이 없는 칸 — 앱을 켜기 전이거나 조회가 없던 구간.
-const EMPTY: char = '·';
-
 /// 차트가 의미를 갖는 최소 표본 수. 한 점만으로는 변화를 그릴 수 없다.
 const MIN_POINTS: usize = 2;
 
@@ -55,22 +49,29 @@ impl History {
         }
     }
 
-    /// 한 한도의 변화를 창 전체 기간에 걸친 한 줄 차트로 만든다.
+    /// 한 한도의 변화를 창 전체 기간에 걸친 sparkline 데이터로 만든다.
     ///
     /// 가로축은 **창 전체**(세션 5시간 / 주간 7일)다. 바로 위의 시간 게이지와
     /// 같은 축이라 나란히 놓으면 "창의 어느 지점에서 얼마나 썼는지" 가 읽힌다.
     /// 앱을 켜기 전 구간은 데이터가 없으므로 `·` 로 비워 둔다.
     ///
-    /// 세로축은 0~100% 고정이다. 창 전체를 보는 맥락에서는 절대값이 맞다.
-    pub fn chart(&self, title: &str, window: Window, width: usize) -> Option<String> {
-        let points = self.series.get(title)?;
-        if points.len() < MIN_POINTS || width == 0 {
+    /// 세로축은 0~100% 고정이다. `None` 은 앱을 켜기 전이거나
+    /// 조회가 없던 구간이며 렌더러가 따로 표시한다.
+    pub fn chart(&self, title: &str, window: Window, width: usize) -> Option<Vec<Option<u64>>> {
+        if width == 0 {
             return None;
         }
         let start = window.started_at().timestamp() / 60;
         let end = window.resets_at.timestamp() / 60;
         if end <= start {
             return None;
+        }
+
+        let points = self.series.get(title).map(Vec::as_slice).unwrap_or_default();
+        if points.len() < MIN_POINTS {
+            // 한 점만으로는 변화를 그릴 수 없다. 차트를 숨기면 첫 조회 후
+            // 레이아웃이 튀므로, 같은 크기의 빈 placeholder 를 보여준다.
+            return Some(vec![None; width]);
         }
 
         // 각 칸이 담당하는 시간 구간에 표본이 있으면 그 값을, 없으면 빈칸을 그린다
@@ -86,7 +87,7 @@ impl History {
             cells[idx] = Some(p.percent);
         }
 
-        Some(cells.iter().map(|c| c.map_or(EMPTY, block)).collect())
+        Some(cells.into_iter().map(|cell| cell.map(sparkline_value)).collect())
     }
 
     /// 앱을 켠 뒤로 이 한도가 얼마나 늘었는지 — `+6%p`.
@@ -106,11 +107,9 @@ impl History {
     }
 }
 
-/// 0~100% 를 블록 한 글자로.
-fn block(percent: f64) -> char {
-    let ratio = (percent / 100.0).clamp(0.0, 1.0);
-    let idx = (ratio * (BLOCKS.len() - 1) as f64).round() as usize;
-    BLOCKS[idx.min(BLOCKS.len() - 1)]
+/// Ratatui Sparkline 에 넘길 0~100 정수값.
+fn sparkline_value(percent: f64) -> u64 {
+    percent.clamp(0.0, 100.0).round() as u64
 }
 
 #[cfg(test)]
@@ -143,12 +142,22 @@ mod tests {
     }
 
     #[test]
-    fn needs_two_points_to_draw() {
+    fn shows_an_empty_placeholder_until_two_points_exist() {
         let mut h = History::default();
+        let empty = vec![None; 20];
+
+        assert_eq!(h.chart("A", window(0, 60), 20), Some(empty.clone()));
         h.record(&[meter("A", 10.0)], at(0));
-        assert!(h.chart("A", window(0, 60), 20).is_none(), "표본 하나로는 안 그림");
+        assert_eq!(h.chart("A", window(0, 60), 20), Some(empty));
+
         h.record(&[meter("A", 12.0)], at(1));
-        assert!(h.chart("A", window(1, 60), 20).is_some());
+        assert!(
+            h.chart("A", window(1, 60), 20)
+                .unwrap()
+                .iter()
+                .any(Option::is_some),
+            "두 표본부터는 실제 값이 보여야 함"
+        );
     }
 
     /// 같은 분에 여러 번 조회해도 칸은 하나이고, 마지막 값이 남는다.
@@ -158,9 +167,13 @@ mod tests {
         for p in [10.0, 11.0, 13.0] {
             h.record(&[meter("A", p)], at(5));
         }
-        assert!(h.chart("A", window(5, 60), 20).is_none(), "아직 한 칸뿐");
+        assert_eq!(
+            h.chart("A", window(5, 60), 20),
+            Some(vec![None; 20]),
+            "아직 한 표본이므로 placeholder 유지"
+        );
         h.record(&[meter("A", 20.0)], at(6));
-        assert_eq!(h.chart("A", window(6, 60), 20).unwrap().chars().count(), 20);
+        assert_eq!(h.chart("A", window(6, 60), 20).unwrap().len(), 20);
         assert_eq!(h.delta("A").unwrap(), "+7%p");
     }
 
@@ -174,25 +187,24 @@ mod tests {
             h.record(&[meter("A", 50.0)], at(now + i));
         }
         let chart = h.chart("A", window(now + 2, 28), 20).unwrap();
-        let cells: String = chart.chars().take(20).collect();
         // 앞쪽 대부분은 데이터가 없으므로 빈칸이어야 한다
         assert!(
-            cells.starts_with(&EMPTY.to_string().repeat(15)),
-            "앞 구간이 비어야 함: {cells}"
+            chart.iter().take(15).all(Option::is_none),
+            "앞 구간이 비어야 함: {chart:?}"
         );
-        assert!(cells.contains('▅'), "50% 칸이 있어야 함: {cells}");
+        assert!(chart.contains(&Some(50)), "50% 칸이 있어야 함: {chart:?}");
     }
 
     /// 세로축은 0~100% 고정 — 절대값이 그대로 높이가 된다.
     #[test]
     fn height_is_absolute_percent() {
-        assert_eq!(block(0.0), '▁');
-        assert_eq!(block(100.0), '█');
-        // 8단계라 50% 는 정확히 가운데 칸이 없다 — 3.5 를 반올림해 ▅ 가 된다
-        assert_eq!(block(50.0), '▅');
+        assert_eq!(sparkline_value(0.0), 0);
+        assert_eq!(sparkline_value(100.0), 100);
+        assert_eq!(sparkline_value(50.4), 50);
+        assert_eq!(sparkline_value(50.5), 51);
         // 범위를 벗어나도 잘라낸다
-        assert_eq!(block(-5.0), '▁');
-        assert_eq!(block(150.0), '█');
+        assert_eq!(sparkline_value(-5.0), 0);
+        assert_eq!(sparkline_value(150.0), 100);
     }
 
     /// 창 밖(이전 창)의 표본은 그리지 않는다.
@@ -203,14 +215,13 @@ mod tests {
         h.record(&[meter("A", 10.0)], at(1000));
         h.record(&[meter("A", 12.0)], at(1001));
         let chart = h.chart("A", window(1001, 30), 20).unwrap();
-        let cells: String = chart.chars().take(20).collect();
-        assert!(!cells.contains('█'), "창 밖 90% 가 그려지면 안 됨: {cells}");
+        assert!(!chart.contains(&Some(90)), "창 밖 90% 가 그려지면 안 됨: {chart:?}");
     }
 
     #[test]
-    fn unknown_title_has_no_chart() {
+    fn unknown_title_gets_an_empty_placeholder() {
         let h = History::default();
-        assert!(h.chart("없음", window(0, 60), 20).is_none());
+        assert_eq!(h.chart("없음", window(0, 60), 20), Some(vec![None; 20]));
     }
 
     /// 여러 한도를 따로 추적한다.
