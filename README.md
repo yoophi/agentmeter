@@ -55,6 +55,20 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 `codexmeter` 도 옵션이 완전히 같습니다.
 상주 모드에서 `r` 은 즉시 새로고침, `q` 는 종료입니다.
 
+상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 한 줄 차트로 보여줍니다.
+
+```
+ › Current session  +3%p
+   ██████████████████████████░░░░░░░░  62% used
+   ████████████████████████████████░░  0 hour 24 minutes left
+   ·····························▅▅▆··
+   Resets Aug 18 at 9:30pm (Asia/Seoul)
+```
+
+가로축은 창 전체(세션 5시간 / 주간 7일)라 바로 위 시간 게이지와 축이 같고,
+앱을 켜기 전 구간은 `·` 로 비어 있습니다. 제목 옆 `+3%p` 는 켠 뒤로 늘어난 양입니다.
+기록은 메모리에만 남으므로 1회 실행에는 차트가 나오지 않습니다.
+
 출력이 터미널이 아니면(파이프, `watch` 아래) 자동으로 1회 출력으로 내려갑니다.
 전체 화면 TUI 는 alternate screen 을 쓰기 때문에 `watch` 안에서는 동작할 수 없습니다.
 
@@ -138,6 +152,7 @@ src/
   meter.rs        공통 화면 표현 (제목·게이지 두 줄·각주) + 문구·창 진행률 계산
   app.rs          모드 분기와 실행 로직
   cli.rs          공통 옵션
+  history.rs      실행 후 사용률 변화와 텍스트 차트 (상주 모드)
   render/         plain(stdout) · tui(ratatui) 렌더러 · JSON 출력
   claude/         api(HTTP) · auth(Keychain) · source(캐시 우선) · model
   codex/          client(app-server) · source · model

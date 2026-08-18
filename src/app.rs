@@ -104,6 +104,7 @@ mod tests {
                 label: "50% used".into(),
                 level: Level::Normal,
             },
+            window: None,
             time: None,
             footnote: Some("Resets Aug 18 at 9:30pm (Asia/Seoul)".into()),
             emphasized: false,

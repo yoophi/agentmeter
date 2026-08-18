@@ -1,6 +1,7 @@
 pub mod app;
 pub mod claude;
 pub mod cli;
+pub mod history;
 pub mod codex;
 pub mod meter;
 pub mod render;

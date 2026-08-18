@@ -93,6 +93,7 @@ mod tests {
                 label: format!("{:.0}% used", fill * 100.0),
                 level: Level::Normal,
             },
+            window: None,
             time: None,
             footnote: Some("Resets Aug 18 at 9:29pm (Asia/Seoul)".into()),
             emphasized,

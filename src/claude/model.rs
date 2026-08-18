@@ -8,7 +8,9 @@
 use chrono::{DateTime, Local};
 use serde::Deserialize;
 
-use crate::meter::{Bar, Level, Meter, level_from_used, resets_text, time_bar, window_title};
+use crate::meter::{
+    Bar, Level, Meter, Window, level_from_used, resets_text, time_bar, window_title,
+};
 
 /// 세션 한도 창 길이. 응답이 창 길이를 알려주지 않아 상수로 둔다
 /// (`five_hour` 라는 필드명과 `/usage` 화면이 근거다).
@@ -118,12 +120,15 @@ pub fn to_meters(limits: &[Limit], tz: &str) -> Vec<Meter> {
         .map(|l| {
             // 타임스탬프는 한 번만 파싱해서 게이지와 각주가 함께 쓴다
             let at = l.resets_at_local();
+            let window = at.zip(window_for(&l.kind)).map(|(at, len)| Window {
+                resets_at: at,
+                len,
+            });
             Meter {
                 title: l.title(),
                 usage: Bar::used(l.percent, Some(l.level())),
-                time: at
-                    .zip(window_for(&l.kind))
-                    .and_then(|(at, w)| time_bar(at, w, now)),
+                window,
+                time: window.and_then(|w| time_bar(w.resets_at, w.len, now)),
                 footnote: at.map(|at| resets_text(at, tz)),
                 emphasized: l.is_active,
             }

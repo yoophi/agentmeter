@@ -21,10 +21,21 @@ use crate::meter::{Level, Meter, Origin, Snapshot};
 /// 키 입력은 `event::poll` 이 즉시 깨우므로 이 값과 무관하게 바로 반응한다.
 const TICK: Duration = Duration::from_secs(1);
 
-/// 제목 / 사용량 / 시간 / 각주 / 여백
-const ROWS_PER_METER: usize = 5;
+/// 게이지·차트·각주가 제목 아래에서 들여쓰는 칸 수.
+const GAUGE_INDENT: u16 = 3;
+
+/// 한 항목이 차지하는 줄 수 — 제목·사용량은 항상, 나머지는 있을 때만.
+fn rows_for(m: &Meter, has_chart: bool) -> usize {
+    2 + usize::from(m.time.is_some())
+        + usize::from(has_chart)
+        + usize::from(m.footnote.is_some())
+        + 1 // 항목 사이 여백
+}
+
+use chrono::Local;
 
 use crate::app::Fetch;
+use crate::history::History;
 
 enum Msg {
     Data(Snapshot),
@@ -36,6 +47,8 @@ struct App {
     meters: Vec<Meter>,
     /// 값을 언제 어디서 가져왔는지 (캐시일 수 있다)
     origin: Option<Origin>,
+    /// 앱을 켠 뒤로 모은 변화. 상주 모드에서만 쌓인다.
+    history: History,
     error: Option<String>,
     next_fetch: Option<Instant>,
     interval: Duration,
@@ -60,6 +73,7 @@ pub fn run(prog: &str, interval_secs: u64, tz: String, fetch: Fetch) -> Result<(
         prog: prog.to_string(),
         meters: Vec::new(),
         origin: None,
+        history: History::default(),
         error: None,
         next_fetch: None,
         interval,
@@ -102,6 +116,7 @@ fn event_loop(
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 Msg::Data(snap) => {
+                    app.history.record(&snap.meters, Local::now());
                     app.meters = snap.meters;
                     app.origin = Some(snap.origin);
                     app.error = None;
@@ -173,36 +188,60 @@ fn draw_meters(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // 항목당 제목 / 사용량 / 시간 / 각주 / 여백
-    let rows: Vec<Constraint> = app
+    // 차트 폭은 게이지와 같게 맞춘다 — 같은 창을 같은 축으로 보여주기 때문이다
+    let chart_width = area.width.saturating_sub(GAUGE_INDENT) as usize;
+    let charts: Vec<Option<String>> = app
         .meters
         .iter()
-        .flat_map(|_| [Constraint::Length(1); ROWS_PER_METER])
+        .map(|m| {
+            m.window
+                .and_then(|w| app.history.chart(&m.title, w, chart_width))
+        })
+        .collect();
+
+    let sizes: Vec<usize> = app
+        .meters
+        .iter()
+        .zip(&charts)
+        .map(|(m, c)| rows_for(m, c.is_some()))
+        .collect();
+    let rows: Vec<Constraint> = sizes
+        .iter()
+        .flat_map(|n| std::iter::repeat_n(Constraint::Length(1), *n))
         .chain(std::iter::once(Constraint::Min(0)))
         .collect();
     let slots = Layout::vertical(rows).split(area);
 
-    // `Layout::split` 은 화면이 작아도 제약 수만큼 Rect 를 돌려주므로
-    // (넘치는 것은 높이 0) 항목마다 정확히 ROWS_PER_METER 칸이 있다.
-    for (rows, m) in slots.chunks_exact(ROWS_PER_METER).zip(&app.meters) {
-        draw_one(f, rows, m);
+    let mut base = 0;
+    for ((m, chart), n) in app.meters.iter().zip(&charts).zip(&sizes) {
+        let delta = app.history.delta(&m.title);
+        draw_one(f, &slots[base..base + n], m, chart.as_deref(), delta.as_deref());
+        base += n;
     }
 }
 
-fn draw_one(f: &mut Frame, slots: &[Rect], m: &Meter) {
+fn draw_one(
+    f: &mut Frame,
+    slots: &[Rect],
+    m: &Meter,
+    chart: Option<&str>,
+    delta: Option<&str>,
+) {
     let marker = if m.emphasized { "›" } else { " " };
     let title_style = if m.emphasized {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {marker} {}", m.title),
-            title_style,
-        ))),
-        slots[0],
-    );
+    let mut title = vec![Span::styled(format!(" {marker} {}", m.title), title_style)];
+    // 앱을 켠 뒤 늘어난 양 — 차트 옆에 두면 폭이 밀려 제목 줄에 붙인다
+    if let Some(delta) = delta {
+        title.push(Span::styled(
+            format!("  {delta}"),
+            Style::default().fg(Color::Indexed(109)),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(title)), slots[0]);
 
     // 시간 게이지는 사용량 바로 아래 — 둘을 견줘야 페이스가 읽힌다
     let bars = std::iter::once(&m.usage).chain(m.time.as_ref());
@@ -213,7 +252,19 @@ fn draw_one(f: &mut Frame, slots: &[Rect], m: &Meter) {
                 .gauge_style(Style::default().fg(color_for(bar.level)))
                 .ratio(bar.fill_clamped())
                 .label(bar.label.as_str()),
-            indent(slots[row], 3),
+            indent(slots[row], GAUGE_INDENT),
+        );
+        row += 1;
+    }
+
+    // 시계열 차트는 시간 게이지 바로 아래 — 가로축이 같아 세로로 맞춰 읽힌다
+    if let Some(chart) = chart {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                chart,
+                Style::default().fg(Color::Indexed(109)),
+            ))),
+            indent(slots[row], GAUGE_INDENT),
         );
         row += 1;
     }
@@ -224,7 +275,7 @@ fn draw_one(f: &mut Frame, slots: &[Rect], m: &Meter) {
                 note.as_str(),
                 Style::default().fg(Color::DarkGray),
             ))),
-            indent(slots[row], 3),
+            indent(slots[row], GAUGE_INDENT),
         );
     }
 }
@@ -286,6 +337,7 @@ mod tests {
                 label: format!("{:.0}% used", fill * 100.0),
                 level: Level::Normal,
             },
+            window: None,
             time: Some(Bar {
                 fill: 0.4,
                 label: "1 hour 12 minutes left".into(),
@@ -301,6 +353,7 @@ mod tests {
             prog: "ccmeter".into(),
             meters,
             origin: None,
+            history: History::default(),
             error: None,
             next_fetch: None,
             interval: Duration::from_secs(60),
@@ -368,6 +421,28 @@ mod tests {
         let mut app = app_with(three());
         app.prog = "codexmeter".into();
         assert!(render(&app, 60, 20).contains("codexmeter"));
+    }
+
+    /// 표본이 쌓이면 시계열 차트 줄이 생긴다.
+    #[test]
+    fn draws_the_history_chart_once_samples_exist() {
+        let mut app = app_with(three());
+        // 창 정보가 있어야 가로축을 잡을 수 있다
+        let w = crate::meter::Window {
+            resets_at: Local::now() + chrono::TimeDelta::minutes(30),
+            len: chrono::TimeDelta::hours(5),
+        };
+        for m in &mut app.meters {
+            m.window = Some(w);
+        }
+        let before = render(&app, 80, 30);
+        assert!(!before.contains('·'), "표본 전에는 차트가 없다");
+
+        let now = Local::now();
+        app.history.record(&app.meters.clone(), now - chrono::TimeDelta::minutes(2));
+        app.history.record(&app.meters.clone(), now);
+        let after = render(&app, 80, 30);
+        assert!(after.contains('·'), "차트의 빈 구간이 보여야 함:\n{after}");
     }
 
     /// 화면이 짧아 다 못 그려도 패닉하지 않아야 한다.

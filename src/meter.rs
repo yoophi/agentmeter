@@ -49,11 +49,26 @@ impl Bar {
     }
 }
 
+/// 한도 창(window). 시간 게이지와 시계열 차트의 가로축이 된다.
+#[derive(Debug, Clone, Copy)]
+pub struct Window {
+    pub resets_at: chrono::DateTime<chrono::Local>,
+    pub len: chrono::TimeDelta,
+}
+
+impl Window {
+    pub fn started_at(&self) -> chrono::DateTime<chrono::Local> {
+        self.resets_at - self.len
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Meter {
     pub title: String,
     /// 한도를 얼마나 썼는지
     pub usage: Bar,
+    /// 이 한도가 속한 창. 창 길이를 모르면 없다.
+    pub window: Option<Window>,
     /// 창(window)의 시간이 얼마나 흘렀는지. 창 길이를 모르면 없다.
     ///
     /// 사용률과 나란히 두면 페이스를 볼 수 있다 —

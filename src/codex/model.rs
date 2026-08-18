@@ -8,7 +8,7 @@
 use chrono::{DateTime, Local, TimeZone};
 use serde::Deserialize;
 
-use crate::meter::{Bar, Meter, resets_text, time_bar, window_title};
+use crate::meter::{Bar, Meter, Window as MeterWindow, resets_text, time_bar, window_title};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,10 +93,15 @@ pub fn to_meters(resp: &RateLimitsResponse, tz: &str) -> Vec<Meter> {
             }
             // 타임스탬프는 한 번만 변환해서 게이지와 각주가 함께 쓴다
             let at = w.resets_at_local();
+            let window = at.map(|at| MeterWindow {
+                resets_at: at,
+                len: chrono::TimeDelta::minutes(mins),
+            });
             out.push(Meter {
                 title: window_title(Some(mins), scope),
                 usage: Bar::used(w.used_percent, None),
-                time: at.and_then(|at| time_bar(at, chrono::TimeDelta::minutes(mins), now)),
+                window,
+                time: window.and_then(|w| time_bar(w.resets_at, w.len, now)),
                 footnote: at.map(|at| resets_text(at, tz)),
                 emphasized: false,
             });
