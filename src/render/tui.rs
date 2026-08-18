@@ -218,7 +218,7 @@ fn draw_meters(f: &mut Frame, area: Rect, app: &App) {
 
     let mut base = 0;
     for ((m, chart), n) in app.meters.iter().zip(&charts).zip(&sizes) {
-        let delta = app.history.delta(&m.title);
+        let delta = app.history.delta(&m.title, m.window);
         draw_one(f, &slots[base..base + n], m, chart.as_deref(), delta.as_deref());
         base += n;
     }

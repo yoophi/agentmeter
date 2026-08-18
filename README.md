@@ -69,6 +69,7 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 
 가로축은 창 전체(세션 5시간 / 주간 7일)라 바로 위 시간 게이지와 축이 같고,
 앱을 켜기 전 구간은 `·` 로 비어 있습니다. 제목 옆 `+3%p` 는 켠 뒤로 늘어난 양입니다.
+한도 창이 리셋되면 이전 창의 표본은 변화량에서 제외됩니다.
 세로축은 0~100%로 고정되며 Ratatui 내장 `Sparkline` 이 3행에 걸쳐 사용률을 그립니다.
 표본이 두 개 미만이어서 변화를 그릴 수 없을 때는 같은 크기의 `·` placeholder 를 보여줍니다.
 기록은 메모리에만 남으므로 1회 실행에는 차트가 나오지 않습니다.
@@ -80,13 +81,15 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 
 ### ccmeter
 
-**로컬 캐시를 먼저 읽습니다.** Claude Code 는 `/api/oauth/usage` 응답을 통째로
-`~/.claude/token-scope-oauth-usage.json` 에 저장해 두는데, 그 파일을 읽으면
-네트워크 호출이 없어 즉시 응답하고 `HTTP 429` 도 없습니다.
+**로컬 캐시를 먼저 읽습니다.** Claude Code 의 캐시와 ccmeter 가 마지막 직접 조회를
+보존한 캐시 중 최신 값을 사용합니다. 네트워크 호출이 없어 즉시 응답하고
+`HTTP 429` 도 없습니다.
 
 캐시가 15분보다 오래됐을 때만 `GET /api/oauth/usage` 를 직접 호출합니다.
 조회에 실패하면 5분간 다시 시도하지 않고, 그동안은 캐시 값에 `갱신 실패` 를 붙여
-보여줍니다. `--live` 는 캐시를 건너뛰고 항상 직접 조회합니다.
+보여줍니다. 직접 조회에 성공한 값은 `~/.cache/agentmeter/claude-usage.json` 에
+저장해 다음 조회가 제한되어도 오래된 값으로 돌아가지 않습니다. `--live` 는 캐시를
+건너뛰고 항상 직접 조회합니다.
 
 직접 조회할 때 자격증명은 macOS Keychain(`Claude Code-credentials`), 없으면
 `~/.claude/.credentials.json` 에서 **읽기만** 합니다.
@@ -148,6 +151,7 @@ ccmeter 가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본 경로
 - [docs/architecture.md](docs/architecture.md) — 공통 구조, `Meter` 표현, 실행 모드
 - [docs/ccmeter.md](docs/ccmeter.md) — 캐시 우선 조회, 자격증명, 429 대응
 - [docs/codexmeter.md](docs/codexmeter.md) — app-server 프로토콜, 응답 처리
+- [docs/insights-2026-08-19.md](docs/insights-2026-08-19.md) — 리셋·오래된 캐시 오류에서 얻은 설계 인사이트
 
 ## 구조
 

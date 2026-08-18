@@ -94,12 +94,20 @@ impl History {
     ///
     /// 차트 옆에 붙이면 폭이 밀리므로 제목 줄에 따로 놓는다.
     /// 변화가 없으면 `None` — 굳이 `0%p` 를 띄울 이유가 없다.
-    pub fn delta(&self, title: &str) -> Option<String> {
-        let points = self.series.get(title)?;
-        if points.len() < MIN_POINTS {
-            return None;
-        }
-        let diff = points.last()?.percent - points.first()?.percent;
+    pub fn delta(&self, title: &str, window: Option<Window>) -> Option<String> {
+        let bounds = window.map(|w| {
+            (
+                w.started_at().timestamp() / 60,
+                w.resets_at.timestamp() / 60,
+            )
+        });
+        let mut points = self.series.get(title)?.iter().filter(|point| {
+            bounds.is_none_or(|(start, end)| start <= point.minute && point.minute < end)
+        });
+        let first = points.next()?;
+        let second = points.next()?;
+        let last = points.next_back().unwrap_or(second);
+        let diff = last.percent - first.percent;
         if diff.abs() < 0.5 {
             return None;
         }
@@ -174,7 +182,7 @@ mod tests {
         );
         h.record(&[meter("A", 20.0)], at(6));
         assert_eq!(h.chart("A", window(6, 60), 20).unwrap().len(), 20);
-        assert_eq!(h.delta("A").unwrap(), "+7%p");
+        assert_eq!(h.delta("A", None).unwrap(), "+7%p");
     }
 
     /// 가로축은 창 전체. 앱을 켜기 전 구간은 비어 있어야 한다.
@@ -233,8 +241,8 @@ mod tests {
         }
         let w = window(1001, 30);
         assert!(h.chart("A", w, 20).is_some());
-        assert_eq!(h.delta("A").unwrap(), "+10%p");
-        assert_eq!(h.delta("B").unwrap(), "+1%p");
+        assert_eq!(h.delta("A", None).unwrap(), "+10%p");
+        assert_eq!(h.delta("B", None).unwrap(), "+1%p");
     }
 
     /// 줄지 않았으면 굳이 표시하지 않는다.
@@ -243,7 +251,7 @@ mod tests {
         let mut h = History::default();
         h.record(&[meter("A", 30.0)], at(1000));
         h.record(&[meter("A", 30.0)], at(1001));
-        assert!(h.delta("A").is_none());
+        assert!(h.delta("A", None).is_none());
     }
 
     /// 줄어든 경우(창 리셋 등)도 부호와 함께 보여준다.
@@ -252,7 +260,19 @@ mod tests {
         let mut h = History::default();
         h.record(&[meter("A", 80.0)], at(1000));
         h.record(&[meter("A", 5.0)], at(1001));
-        assert_eq!(h.delta("A").unwrap(), "-75%p");
+        assert_eq!(h.delta("A", None).unwrap(), "-75%p");
+    }
+
+    /// 창이 리셋되면 이전 창의 높은 사용률을 변화량에 섞지 않는다.
+    #[test]
+    fn delta_uses_only_samples_from_the_current_window() {
+        let mut h = History::default();
+        h.record(&[meter("A", 70.0)], at(299)); // 이전 창
+        h.record(&[meter("A", 2.0)], at(300)); // 새 창 시작
+        h.record(&[meter("A", 4.0)], at(301));
+
+        let current = window(301, 299); // 300..600
+        assert_eq!(h.delta("A", Some(current)).as_deref(), Some("+2%p"));
     }
 
     #[test]
