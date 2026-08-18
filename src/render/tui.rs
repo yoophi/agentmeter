@@ -36,8 +36,6 @@ fn rows_for(m: &Meter, has_chart: bool) -> usize {
         + 1 // 항목 사이 여백
 }
 
-use chrono::Local;
-
 use crate::app::Fetch;
 use crate::history::History;
 
@@ -51,7 +49,7 @@ struct App {
     meters: Vec<Meter>,
     /// 값을 언제 어디서 가져왔는지 (캐시일 수 있다)
     origin: Option<Origin>,
-    /// 앱을 켠 뒤로 모은 변화. 상주 모드에서만 쌓인다.
+    /// 현재 한도 창에서 모은 변화. 재실행해도 같은 창이면 복원한다.
     history: History,
     error: Option<String>,
     next_fetch: Option<Instant>,
@@ -69,7 +67,7 @@ impl App {
 pub fn run(prog: &str, interval_secs: u64, tz: String, fetch: Fetch) -> Result<()> {
     let interval = Duration::from_secs(interval_secs);
     let (tx, rx) = mpsc::channel::<Msg>();
-    let (req_tx, req_rx) = mpsc::channel::<()>();
+    let (req_tx, req_rx) = mpsc::channel::<bool>();
 
     spawn_worker(tx, req_rx, interval, fetch);
 
@@ -77,7 +75,7 @@ pub fn run(prog: &str, interval_secs: u64, tz: String, fetch: Fetch) -> Result<(
         prog: prog.to_string(),
         meters: Vec::new(),
         origin: None,
-        history: History::default(),
+        history: History::persistent(prog),
         error: None,
         next_fetch: None,
         interval,
@@ -92,10 +90,11 @@ pub fn run(prog: &str, interval_secs: u64, tz: String, fetch: Fetch) -> Result<(
 
 /// 워커: 즉시 한 번 가져오고, 이후 `interval` 마다.
 /// 대기 중 새로고침 요청이 오면 기다리지 않고 바로 다시 가져온다.
-fn spawn_worker(tx: Sender<Msg>, req_rx: Receiver<()>, interval: Duration, fetch: Fetch) {
+fn spawn_worker(tx: Sender<Msg>, req_rx: Receiver<bool>, interval: Duration, fetch: Fetch) {
     thread::spawn(move || {
+        let mut force_live = false;
         loop {
-            let msg = match fetch() {
+            let msg = match fetch(force_live) {
                 Ok(snap) => Msg::Data(snap),
                 Err(e) => Msg::Failed(e.to_string()),
             };
@@ -103,7 +102,8 @@ fn spawn_worker(tx: Sender<Msg>, req_rx: Receiver<()>, interval: Duration, fetch
                 return; // 메인이 끝났다
             }
             match req_rx.recv_timeout(interval) {
-                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Ok(force) => force_live = force,
+                Err(RecvTimeoutError::Timeout) => force_live = false,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -114,16 +114,18 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     rx: &Receiver<Msg>,
-    req_tx: &Sender<()>,
+    req_tx: &Sender<bool>,
 ) -> Result<()> {
     loop {
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 Msg::Data(snap) => {
-                    app.history.record(&snap.meters, Local::now());
+                    // 캐시를 지금 읽었더라도 표본 시각은 실제 측정 시각을 쓴다.
+                    // 그렇지 않으면 오래된 값을 현재 window 의 새 표본처럼 저장한다.
+                    let history_error = app.history.record(&snap.meters, snap.origin.at).err();
                     app.meters = snap.meters;
                     app.origin = Some(snap.origin);
-                    app.error = None;
+                    app.error = history_error.map(|e| format!("히스토리 저장 실패: {e:#}"));
                 }
                 // 이전 데이터는 지우지 않는다 — 일시적 실패로 화면이 비면 더 나쁘다
                 Msg::Failed(m) => app.error = Some(m),
@@ -143,7 +145,10 @@ fn event_loop(
                     return Ok(());
                 }
                 KeyCode::Char('r') => {
-                    let _ = req_tx.send(());
+                    let _ = req_tx.send(false);
+                }
+                KeyCode::Char('R') => {
+                    let _ = req_tx.send(true);
                 }
                 _ => {}
             }
@@ -152,10 +157,15 @@ fn event_loop(
 }
 
 fn draw(f: &mut Frame, app: &App) {
+    let footer_height = if app.error.is_some() && !app.meters.is_empty() {
+        2
+    } else {
+        1
+    };
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
     .areas(f.area());
 
@@ -219,7 +229,13 @@ fn draw_meters(f: &mut Frame, area: Rect, app: &App) {
     let mut base = 0;
     for ((m, chart), n) in app.meters.iter().zip(&charts).zip(&sizes) {
         let delta = app.history.delta(&m.title, m.window);
-        draw_one(f, &slots[base..base + n], m, chart.as_deref(), delta.as_deref());
+        draw_one(
+            f,
+            &slots[base..base + n],
+            m,
+            chart.as_deref(),
+            delta.as_deref(),
+        );
         base += n;
     }
 }
@@ -238,7 +254,7 @@ fn draw_one(
         Style::default()
     };
     let mut title = vec![Span::styled(format!(" {marker} {}", m.title), title_style)];
-    // 앱을 켠 뒤 늘어난 양 — 차트 옆에 두면 폭이 밀려 제목 줄에 붙인다
+    // 현재 창의 첫 표본 이후 늘어난 양 — 차트 옆에 두면 폭이 밀려 제목 줄에 붙인다
     if let Some(delta) = delta {
         title.push(Span::styled(
             format!("  {delta}"),
@@ -303,19 +319,28 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     if let Some(secs) = app.seconds_until_refresh() {
         parts.push(format!("다음 {secs}초"));
     }
-    // 데이터는 살아 있는데 갱신만 실패한 상태를 알린다
-    if app.error.is_some() && !app.meters.is_empty() {
-        parts.push("갱신 실패".to_string());
-    }
-    parts.push("[r] 새로고침  [q] 종료".to_string());
+    let controls = if app.prog == "ccmeter" {
+        "[r] 새로고침  [R] HTTP 조회  [q] 종료"
+    } else {
+        "[r] 새로고침  [q] 종료"
+    };
+    parts.push(controls.to_string());
 
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {}", parts.join("  ·  ")),
-            Style::default().fg(Color::DarkGray),
-        ))),
-        area,
-    );
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" {}", parts.join("  ·  ")),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    // 직전 데이터는 유지하되 429 같은 실제 실패 사유를 숨기지 않는다.
+    if let Some(error) = &app.error
+        && !app.meters.is_empty()
+    {
+        lines.push(Line::from(Span::styled(
+            format!(" 갱신 실패: {error}"),
+            Style::default().fg(color_for(Level::Critical)),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn indent(area: Rect, by: u16) -> Rect {
@@ -338,7 +363,9 @@ fn color_for(level: Level) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FetchError;
     use crate::meter::Bar;
+    use chrono::Local;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -451,11 +478,16 @@ mod tests {
         }
         let before = render(&app, 80, 30);
         let placeholder_cells = before.matches('·').count();
-        assert!(placeholder_cells > 0, "표본 전에도 빈 차트가 보여야 함:\n{before}");
+        assert!(
+            placeholder_cells > 0,
+            "표본 전에도 빈 차트가 보여야 함:\n{before}"
+        );
 
         let now = Local::now();
-        app.history.record(&app.meters.clone(), now - chrono::TimeDelta::minutes(2));
-        app.history.record(&app.meters.clone(), now);
+        app.history
+            .record(&app.meters.clone(), now - chrono::TimeDelta::minutes(2))
+            .unwrap();
+        app.history.record(&app.meters.clone(), now).unwrap();
         let after = render(&app, 80, 30);
         assert!(after.contains('·'), "차트의 빈 구간이 보여야 함:\n{after}");
         assert!(
@@ -480,10 +512,49 @@ mod tests {
     #[test]
     fn keeps_stale_data_on_error() {
         let mut app = app_with(three());
-        app.error = Some("일시적 오류".to_string());
-        let out = render(&app, 60, 20);
+        app.error = Some("조회가 제한되었습니다 (HTTP 429)".to_string());
+        let out = render(&app, 100, 20);
         assert!(out.contains("Current session"), "이전 데이터가 남아야 함");
         assert!(out.contains("갱신 실패"), "실패 사실도 알려야 함");
+        assert!(
+            out.contains("HTTP 429"),
+            "실제 실패 사유도 보여야 함: {out}"
+        );
+    }
+
+    /// 일반 새로고침과 강제 live 새로고침은 워커까지 구분되어 전달되어야 한다.
+    #[test]
+    fn worker_receives_forced_live_refresh() {
+        use std::sync::{Arc, Mutex};
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let fetch: Fetch = Box::new(move |force_live| {
+            seen.lock().unwrap().push(force_live);
+            Err(FetchError::Other(anyhow::anyhow!("HTTP 429")))
+        });
+        let (tx, rx) = mpsc::channel();
+        let (req_tx, req_rx) = mpsc::channel();
+        spawn_worker(tx, req_rx, Duration::from_secs(60), fetch);
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Msg::Failed(_)
+        ));
+        req_tx.send(true).unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Msg::Failed(_)
+        ));
+        drop(req_tx);
+
+        assert_eq!(*calls.lock().unwrap(), vec![false, true]);
+    }
+
+    #[test]
+    fn ccmeter_footer_advertises_http_refresh() {
+        let out = render(&app_with(three()), 100, 20);
+        assert!(out.contains("[R] HTTP 조회"), "{out}");
     }
 
     /// 데이터가 아직 없는데 실패하면 오류를 본문에 보여준다.
