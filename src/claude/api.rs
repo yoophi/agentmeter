@@ -81,7 +81,9 @@ fn status_error(status: u16, retry_after: Option<u64>) -> FetchError {
     match status {
         401 | 403 => FetchError::Unauthorized(auth::reauth_hint().to_string()),
         429 => FetchError::Other(match retry_after {
-            Some(secs) => anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). {secs}초 후 다시 시도하세요"),
+            Some(secs) => {
+                anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). {secs}초 후 다시 시도하세요")
+            }
             None => anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). 잠시 후 다시 시도하세요"),
         }),
         other => FetchError::Other(anyhow::anyhow!("서버가 HTTP {other} 를 반환했습니다")),
@@ -165,7 +167,10 @@ mod tests {
         assert_eq!(retry_after_secs(&headers(&[("retry-after", "0")])), None);
         assert_eq!(retry_after_secs(&headers(&[])), None);
         assert_eq!(retry_after_secs(&headers(&[("retry-after", "soon")])), None);
-        assert_eq!(retry_after_secs(&headers(&[("retry-after", "30")])), Some(30));
+        assert_eq!(
+            retry_after_secs(&headers(&[("retry-after", "30")])),
+            Some(30)
+        );
     }
 
     #[test]

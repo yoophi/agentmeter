@@ -8,8 +8,12 @@ use crate::render::{BOLD, DIM, MUTED, RESET, ansi_for};
 
 const GAUGE_MIN: usize = 20;
 const GAUGE_MAX: usize = 48;
-/// 게이지 우측 라벨(`100% used`)이 들어갈 여백
-const SUFFIX_ROOM: usize = 14;
+/// 게이지 우측 라벨(`100% used`)이 들어갈 자리 + 오른쪽 여백.
+/// 게이지가 터미널 경계에 붙으면 답답하다.
+const SUFFIX_ROOM: usize = 14 + RIGHT_MARGIN;
+
+/// 화면 오른쪽 여백.
+const RIGHT_MARGIN: usize = 2;
 
 pub fn render(snap: &Snapshot, color: bool, width: usize) -> String {
     let gauge_width = width
@@ -30,7 +34,11 @@ pub fn render(snap: &Snapshot, color: bool, width: usize) -> String {
 }
 
 fn render_one(m: &Meter, color: bool, gauge_width: usize) -> String {
-    let (b, mu, r) = if color { (BOLD, MUTED, RESET) } else { ("", "", "") };
+    let (b, mu, r) = if color {
+        (BOLD, MUTED, RESET)
+    } else {
+        ("", "", "")
+    };
     let marker = if m.emphasized { "› " } else { "  " };
 
     let mut s = String::new();
@@ -51,7 +59,11 @@ fn render_one(m: &Meter, color: bool, gauge_width: usize) -> String {
 fn render_bar(bar: &Bar, color: bool, gauge_width: usize) -> String {
     let filled = (bar.fill_clamped() * gauge_width as f64).round() as usize;
 
-    let (d, mu, r) = if color { (DIM, MUTED, RESET) } else { ("", "", "") };
+    let (d, mu, r) = if color {
+        (DIM, MUTED, RESET)
+    } else {
+        ("", "", "")
+    };
     let a = if color { ansi_for(bar.level) } else { "" };
     // 색이 꺼진 환경에서는 색만으로 채움/빈칸을 구분할 수 없으므로 글자를 바꾼다
     let empty_ch = if color { "█" } else { "░" };
@@ -65,6 +77,106 @@ fn render_bar(bar: &Bar, color: bool, gauge_width: usize) -> String {
     s.push_str(r);
     s.push_str(&format!("  {mu}{}{r}\n", bar.label));
     s
+}
+
+/// 구획을 좌우로 나란히 붙이는 데 필요한 최소 폭.
+/// 이보다 좁으면 게이지가 쓸모없이 짧아지므로 세로로 쌓는다.
+const SIDE_BY_SIDE_MIN: usize = 100;
+
+/// 구획 사이 여백.
+const PANE_GAP: usize = 2;
+
+/// 여러 에이전트를 나란히 붙인다.
+///
+/// 터미널이 충분히 넓으면 TUI 와 같이 **좌우로**(`A | B`) 놓고,
+/// 좁으면 세로로 쌓는다 — 폭 40 짜리 게이지 두 개보다 폭 80 짜리 하나가 읽기 쉽다.
+pub fn render_panes(panes: &[crate::multi::Pane], color: bool, width: usize) -> String {
+    let blocks: Vec<String> = panes
+        .iter()
+        .map(|p| {
+            let per = if side_by_side(panes.len(), width) {
+                column_width(panes.len(), width)
+            } else {
+                width
+            };
+            render_pane(p, color, per)
+        })
+        .collect();
+
+    if side_by_side(panes.len(), width) {
+        join_columns(&blocks, column_width(panes.len(), width))
+    } else {
+        blocks.join("\n")
+    }
+}
+
+fn side_by_side(count: usize, width: usize) -> bool {
+    count > 1 && width >= SIDE_BY_SIDE_MIN
+}
+
+fn column_width(count: usize, width: usize) -> usize {
+    let gaps = PANE_GAP * (count - 1);
+    width.saturating_sub(gaps) / count
+}
+
+fn render_pane(pane: &crate::multi::Pane, color: bool, width: usize) -> String {
+    let (b, r) = if color { (BOLD, RESET) } else { ("", "") };
+    let mut out = format!("{b}[{}]{r}\n", pane.agent.display);
+    match &pane.result {
+        Ok(snap) => out.push_str(&render(snap, color, width)),
+        // 하나가 실패해도 나머지는 계속 보여준다
+        Err(e) => out.push_str(&render_error(pane.agent.binary, &e.to_string(), color)),
+    }
+    out
+}
+
+/// 여러 블록을 좌우로 합친다. 줄 수가 다르면 짧은 쪽을 빈 줄로 채운다.
+fn join_columns(blocks: &[String], col: usize) -> String {
+    let columns: Vec<Vec<&str>> = blocks.iter().map(|b| b.lines().collect()).collect();
+    let height = columns.iter().map(Vec::len).max().unwrap_or(0);
+
+    (0..height)
+        .map(|row| {
+            let cells: Vec<String> = columns
+                .iter()
+                .map(|lines| {
+                    let line = lines.get(row).copied().unwrap_or("");
+                    pad_to(line, col)
+                })
+                .collect();
+            // 마지막 열 뒤의 공백은 지운다 — 줄 끝 공백은 복사할 때 거슬린다
+            cells.join(&" ".repeat(PANE_GAP)).trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// 표시 폭을 기준으로 오른쪽을 채운다. ANSI escape 는 폭이 0 이다.
+fn pad_to(line: &str, col: usize) -> String {
+    let shown = display_width(line);
+    if shown >= col {
+        return line.to_string();
+    }
+    format!("{line}{}", " ".repeat(col - shown))
+}
+
+fn display_width(line: &str) -> usize {
+    let mut width = 0;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // escape 시퀀스는 화면을 차지하지 않으므로 끝까지 건너뛴다
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+    }
+    width
 }
 
 /// 오류도 같은 형식으로 보여준다 — `watch` 화면이 빈 채로 남지 않게.
@@ -139,7 +251,10 @@ mod tests {
     #[test]
     fn no_color_emits_no_escape_codes() {
         let out = render(&snap(0.5, false), false, 80);
-        assert!(!out.contains('\x1b'), "색 비활성화 시 escape 코드가 없어야 함");
+        assert!(
+            !out.contains('\x1b'),
+            "색 비활성화 시 escape 코드가 없어야 함"
+        );
     }
 
     #[test]
@@ -171,6 +286,82 @@ mod tests {
             .filter(|l| l.contains('█') || l.contains('░'))
             .count();
         assert_eq!(bars, 1);
+    }
+
+    /// 넓은 화면에서는 구획을 좌우로 나란히 놓는다.
+    #[test]
+    fn wide_terminal_puts_panes_side_by_side() {
+        use crate::multi::Pane;
+        let panes = vec![
+            Pane {
+                agent: crate::registry::find("claude").unwrap(),
+                result: Ok(snap(0.5, false)),
+            },
+            Pane {
+                agent: crate::registry::find("codex").unwrap(),
+                result: Ok(snap(0.25, false)),
+            },
+        ];
+        let out = render_panes(&panes, false, 160);
+        let head = out.lines().next().unwrap();
+        assert!(head.contains("[Claude Code]"), "{head}");
+        assert!(head.contains("[Codex]"), "같은 줄에 나란히: {head}");
+        assert!(
+            head.find("[Claude Code]") < head.find("[Codex]"),
+            "설정 순서대로 왼쪽부터"
+        );
+    }
+
+    /// 좁은 화면에서는 세로로 쌓는다 — 게이지가 쓸모없이 짧아지는 것보다 낫다.
+    #[test]
+    fn narrow_terminal_stacks_panes() {
+        use crate::multi::Pane;
+        let panes = vec![
+            Pane {
+                agent: crate::registry::find("claude").unwrap(),
+                result: Ok(snap(0.5, false)),
+            },
+            Pane {
+                agent: crate::registry::find("codex").unwrap(),
+                result: Ok(snap(0.25, false)),
+            },
+        ];
+        let out = render_panes(&panes, false, 60);
+        let head = out.lines().next().unwrap();
+        assert!(head.contains("[Claude Code]"));
+        assert!(
+            !head.contains("[Codex]"),
+            "좁으면 같은 줄에 두지 않는다: {head}"
+        );
+        assert!(out.contains("[Codex]"), "아래에 있어야 함");
+    }
+
+    /// 줄 끝에 공백을 남기지 않는다.
+    #[test]
+    fn no_trailing_whitespace_in_columns() {
+        let joined = join_columns(&["a\nbb".to_string(), "c".to_string()], 5);
+        for line in joined.lines() {
+            assert_eq!(line, line.trim_end(), "줄 끝 공백: {line:?}");
+        }
+    }
+
+    /// 각 구획에 에이전트 이름이 붙고, 하나가 실패해도 나머지는 그려진다.
+    #[test]
+    fn panes_are_labeled_and_survive_failures() {
+        use crate::multi::Pane;
+        let ok = Pane {
+            agent: crate::registry::find("claude").unwrap(),
+            result: Ok(snap(0.5, false)),
+        };
+        let bad = Pane {
+            agent: crate::registry::find("codex").unwrap(),
+            result: Err(crate::FetchError::Other(anyhow::anyhow!("조회 실패"))),
+        };
+        let out = render_panes(&[ok, bad], false, 80);
+        assert!(out.contains("[Claude Code]"), "{out}");
+        assert!(out.contains("50% used"), "{out}");
+        assert!(out.contains("[Codex]"), "{out}");
+        assert!(out.contains("조회 실패"), "실패도 화면에 남아야 함:\n{out}");
     }
 
     #[test]

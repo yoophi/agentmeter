@@ -1,7 +1,10 @@
 # agentmeter
 
 코딩 에이전트의 사용 한도를 같은 형식으로 보여주는 CLI 모음입니다.
-현재 두 개의 도구를 제공합니다 — Claude Code 용 **`ccmeter`**, Codex 용 **`codexmeter`**.
+
+- **`agentmeter`** — 설정한 에이전트들을 한 화면에 나란히
+- **`ccmeter`** — Claude Code 만
+- **`codexmeter`** — Codex 만
 각 도구의 `/usage`·`/status` 가 보여주는 것과 같은 값 — 한도 소진율과 리셋 시각 — 을
 터미널에서 바로 확인하거나 상주시켜 둘 수 있습니다.
 
@@ -43,6 +46,35 @@ Codex 의 `/status` 는 남은 비율(`71% left`)로 표시하지만, 여기서�
 
 ## 사용법
 
+### agentmeter — 여러 에이전트를 한 화면에
+
+```bash
+agentmeter                              # 설정한 에이전트를 모두 조회
+agentmeter -w                           # 상주 모드 (좌우 분할)
+agentmeter --json                        # 에이전트별 키를 가진 JSON
+
+agentmeter config list                   # 설정 보기
+agentmeter config get agents             # 값 하나 보기
+agentmeter config set agents=claude,codex   # 표시할 에이전트 지정
+```
+
+구획은 **좌우로** 놓입니다 (`A | B`). 터미널이 좁으면(100칸 미만) 1회 출력에서는
+세로로 쌓습니다 — 폭 40짜리 게이지 두 개보다 폭 80짜리 하나가 읽기 쉽습니다.
+
+에이전트 하나가 실패해도 나머지는 그대로 보여주고, 조회는 **동시에** 합니다.
+
+설정은 `~/.config/agentmeter/config.toml` 에 저장됩니다
+(`XDG_CONFIG_HOME` 을 존중합니다).
+
+```toml
+agents = ["claude", "codex"]
+```
+
+순서가 화면 순서입니다. 파일이 없으면 등록된 에이전트를 모두 보여줍니다.
+모르는 이름을 넣으면 **저장하기 전에** 거절합니다.
+
+### ccmeter / codexmeter — 한 에이전트만
+
 ```bash
 ccmeter                    # 한 번 출력하고 종료
 ccmeter -w                 # 상주 모드 (전체 화면, 60초마다 갱신)
@@ -52,34 +84,22 @@ ccmeter --live             # 캐시를 건너뛰고 직접 조회 (ccmeter 전�
 watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 ```
 
-상주 모드에서는 `r`이 캐시 우선 새로고침을, `R`이 캐시를 건너뛴 HTTP 직접 조회를
-실행합니다. 직접 조회가 실패하면 직전 값은 유지하고 실제 오류 문구를 화면 아래에
-표시합니다.
-
 `codexmeter` 도 옵션이 완전히 같습니다.
 상주 모드에서 `r` 은 즉시 새로고침, `q` 는 종료입니다.
 
-상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 3행 sparkline 으로 보여줍니다.
-표본은 `~/.cache/agentmeter/history/` 아래에 5시간·7일 리셋 창별 파일로
-저장되며, 재실행해도 같은 리셋 창이면 이어서 표시합니다.
+상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 한 줄 차트로 보여줍니다.
 
 ```
  › Current session  +3%p
    ██████████████████████████░░░░░░░░  62% used
    ████████████████████████████████░░  0 hour 24 minutes left
-   ···································
    ·····························▅▅▆··
-   ······························███··
    Resets Aug 18 at 9:30pm (Asia/Seoul)
 ```
 
 가로축은 창 전체(세션 5시간 / 주간 7일)라 바로 위 시간 게이지와 축이 같고,
-아직 수집하지 못한 구간은 `·` 로 비어 있습니다. 제목 옆 `+3%p` 는 현재 창에 저장된
-첫 표본 이후 늘어난 양입니다.
-한도 창이 리셋되면 이전 창의 표본은 변화량에서 제외됩니다.
-세로축은 0~100%로 고정되며 Ratatui 내장 `Sparkline` 이 3행에 걸쳐 사용률을 그립니다.
-표본이 두 개 미만이어서 변화를 그릴 수 없을 때는 같은 크기의 `·` placeholder 를 보여줍니다.
-첫 실행처럼 현재 창의 저장 표본이 하나뿐이면 실제 차트 대신 placeholder가 나옵니다.
+앱을 켜기 전 구간은 `·` 로 비어 있습니다. 제목 옆 `+3%p` 는 켠 뒤로 늘어난 양입니다.
+기록은 메모리에만 남으므로 1회 실행에는 차트가 나오지 않습니다.
 
 출력이 터미널이 아니면(파이프, `watch` 아래) 자동으로 1회 출력으로 내려갑니다.
 전체 화면 TUI 는 alternate screen 을 쓰기 때문에 `watch` 안에서는 동작할 수 없습니다.
@@ -88,15 +108,13 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 
 ### ccmeter
 
-**로컬 캐시를 먼저 읽습니다.** Claude Code 의 캐시와 ccmeter 가 마지막 직접 조회를
-보존한 캐시 중 최신 값을 사용합니다. 네트워크 호출이 없어 즉시 응답하고
-`HTTP 429` 도 없습니다.
+**로컬 캐시를 먼저 읽습니다.** Claude Code 는 `/api/oauth/usage` 응답을 통째로
+`~/.claude/token-scope-oauth-usage.json` 에 저장해 두는데, 그 파일을 읽으면
+네트워크 호출이 없어 즉시 응답하고 `HTTP 429` 도 없습니다.
 
 캐시가 15분보다 오래됐을 때만 `GET /api/oauth/usage` 를 직접 호출합니다.
 조회에 실패하면 5분간 다시 시도하지 않고, 그동안은 캐시 값에 `갱신 실패` 를 붙여
-보여줍니다. 직접 조회에 성공한 값은 `~/.cache/agentmeter/claude-usage.json` 에
-저장해 다음 조회가 제한되어도 오래된 값으로 돌아가지 않습니다. `--live` 는 캐시를
-건너뛰고 항상 직접 조회합니다.
+보여줍니다. `--live` 는 캐시를 건너뛰고 항상 직접 조회합니다.
 
 직접 조회할 때 자격증명은 macOS Keychain(`Claude Code-credentials`), 없으면
 `~/.claude/.credentials.json` 에서 **읽기만** 합니다.
@@ -158,7 +176,6 @@ ccmeter 가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본 경로
 - [docs/architecture.md](docs/architecture.md) — 공통 구조, `Meter` 표현, 실행 모드
 - [docs/ccmeter.md](docs/ccmeter.md) — 캐시 우선 조회, 자격증명, 429 대응
 - [docs/codexmeter.md](docs/codexmeter.md) — app-server 프로토콜, 응답 처리
-- [docs/insights-2026-08-19.md](docs/insights-2026-08-19.md) — 리셋·오래된 캐시 오류에서 얻은 설계 인사이트
 
 ## 구조
 
@@ -167,7 +184,10 @@ src/
   meter.rs        공통 화면 표현 (제목·게이지 두 줄·각주) + 문구·창 진행률 계산
   app.rs          모드 분기와 실행 로직
   cli.rs          공통 옵션
-  history.rs      창별 사용률 영속 기록과 텍스트 차트 (상주 모드)
+  history.rs      한도 창별 사용률 영속 기록과 Sparkline 차트
+  config.rs       설정 파일 (표시할 에이전트)
+  registry.rs     이름 → 에이전트 표
+  multi.rs        여러 에이전트 동시 조회
   render/         plain(stdout) · tui(ratatui) 렌더러 · JSON 출력
   claude/         api(HTTP) · auth(Keychain) · source(캐시 우선) · model
   codex/          client(app-server) · source · model
@@ -176,8 +196,9 @@ src/
 
 각 도구는 자기 응답을 `Meter` 로 옮기기만 하고, 게이지·TUI·CLI 는 전부 공유합니다.
 새 에이전트를 추가하려면 `src/<이름>/` 에 클라이언트와 `to_meters()`,
-그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 넣고
-`src/bin/` 에 진입점 한 파일을 두면 됩니다.
+그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 만든 뒤
+`registry.rs` 에 한 줄 등록하면 됩니다. 그러면 설정 파일과 `agentmeter` 가
+바로 알아봅니다. 전용 바이너리를 따로 두고 싶으면 `src/bin/` 에 진입점을 추가합니다.
 자세한 것은 [docs/architecture.md](docs/architecture.md) 를 보세요.
 
 ## 설치

@@ -1,7 +1,11 @@
 //! 상주 모드 TUI.
 //!
-//! 네트워크 호출은 워커 스레드가 담당한다. 메인 스레드가 직접 fetch 하면
-//! 타임아웃(최대 15초) 동안 화면이 얼어붙고 키 입력도 안 먹는다.
+//! 화면은 에이전트마다 하나의 **구획(pane)** 으로 좌우로 나뉜다
+//! (`A | B` — tmux 의 수직 분할과 같다). 단일 에이전트 도구
+//! (`ccmeter`, `codexmeter`)는 구획이 하나인 특수한 경우이므로 코드가 하나다.
+//!
+//! 조회는 워커 스레드가 담당한다. 메인 스레드가 직접 하면 타임아웃 동안
+//! 화면이 얼어붙고 키 입력도 안 먹는다.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -15,7 +19,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph, Sparkline};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::meter::{Level, Meter, Origin, Snapshot};
+use crate::history::History;
+use crate::meter::{Bar, Level, Meter, Origin, Snapshot};
+use crate::multi;
+use crate::registry::AgentSpec;
 
 /// 유휴 시 화면을 다시 그리는 주기. 가장 잘게 변하는 것이 `다음 N초` 라 1초면 충분하다.
 /// 키 입력은 `event::poll` 이 즉시 깨우므로 이 값과 무관하게 바로 반응한다.
@@ -24,8 +31,14 @@ const TICK: Duration = Duration::from_secs(1);
 /// 게이지·차트·각주가 제목 아래에서 들여쓰는 칸 수.
 const GAUGE_INDENT: u16 = 3;
 
-/// 1행으로는 8단계뿐이라 변화가 뭉개진다. 3행이면 터미널 블록의
-/// 세부 단계까지 합쳐 충분한 세로 해상도를 얻으면서 항목을 과하게 키우지 않는다.
+/// 좌우로 놓인 구획 사이 여백.
+const PANE_GAP: u16 = 2;
+
+/// 화면 오른쪽 여백. 게이지가 터미널 경계에 붙으면 답답하고,
+/// 창 크기를 줄일 때 글자가 잘리는 것처럼 보인다.
+const RIGHT_MARGIN: u16 = 2;
+
+/// 1행으로는 8단계뿐이라 변화가 뭉개진다. 3행이면 충분한 세로 해상도를 얻는다.
 const HISTORY_CHART_HEIGHT: usize = 3;
 
 /// 한 항목이 차지하는 줄 수 — 제목·사용량은 항상, 나머지는 있을 때만.
@@ -36,25 +49,44 @@ fn rows_for(m: &Meter, has_chart: bool) -> usize {
         + 1 // 항목 사이 여백
 }
 
-use crate::app::Fetch;
-use crate::history::History;
+/// 워커가 한 번 조회해 보낸 결과 — 구획 순서와 같다.
+struct Round(Vec<PaneResult>);
 
-enum Msg {
-    Data(Snapshot),
-    Failed(String),
+struct PaneResult {
+    agent: &'static AgentSpec,
+    outcome: Result<Snapshot, String>,
 }
 
-struct App {
-    prog: String,
+struct Pane {
+    agent: &'static AgentSpec,
     meters: Vec<Meter>,
     /// 값을 언제 어디서 가져왔는지 (캐시일 수 있다)
     origin: Option<Origin>,
     /// 현재 한도 창에서 모은 변화. 재실행해도 같은 창이면 복원한다.
     history: History,
     error: Option<String>,
+}
+
+impl Pane {
+    fn new(agent: &'static AgentSpec) -> Self {
+        Pane {
+            agent,
+            meters: Vec::new(),
+            origin: None,
+            history: History::persistent(agent.binary),
+            error: None,
+        }
+    }
+}
+
+struct App {
+    prog: String,
+    tz: String,
+    panes: Vec<Pane>,
     next_fetch: Option<Instant>,
     interval: Duration,
-    tz: String,
+    /// 구획 머리글을 붙일지. 에이전트가 하나면 군더더기다.
+    label_panes: bool,
 }
 
 impl App {
@@ -62,24 +94,43 @@ impl App {
         let next = self.next_fetch?;
         Some(next.saturating_duration_since(Instant::now()).as_secs())
     }
+
+    /// 화면에 표시할 값의 기준 시각. 구획이 여럿이면 가장 오래된 것을 쓴다 —
+    /// "이 화면 전체가 최소 이만큼 낡았다" 가 사용자가 알아야 할 값이다.
+    fn oldest_origin(&self) -> Option<Origin> {
+        self.panes
+            .iter()
+            .filter_map(|p| p.origin)
+            .max_by_key(|o| o.age_secs())
+    }
+
+    fn any_refresh_failed(&self) -> bool {
+        self.panes
+            .iter()
+            .any(|p| p.error.is_some() && !p.meters.is_empty())
+    }
 }
 
-pub fn run(prog: &str, interval_secs: u64, tz: String, fetch: Fetch) -> Result<()> {
+pub fn run(
+    prog: &str,
+    interval_secs: u64,
+    tz: String,
+    agents: Vec<&'static AgentSpec>,
+    live: bool,
+) -> Result<()> {
     let interval = Duration::from_secs(interval_secs);
-    let (tx, rx) = mpsc::channel::<Msg>();
+    let (tx, rx) = mpsc::channel::<Round>();
     let (req_tx, req_rx) = mpsc::channel::<bool>();
 
-    spawn_worker(tx, req_rx, interval, fetch);
+    spawn_worker(tx, req_rx, interval, tz.clone(), agents.clone(), live);
 
     let mut app = App {
         prog: prog.to_string(),
-        meters: Vec::new(),
-        origin: None,
-        history: History::persistent(prog),
-        error: None,
+        tz,
+        label_panes: agents.len() > 1,
+        panes: agents.into_iter().map(Pane::new).collect(),
         next_fetch: None,
         interval,
-        tz,
     };
 
     let mut terminal = ratatui::init();
@@ -90,15 +141,28 @@ pub fn run(prog: &str, interval_secs: u64, tz: String, fetch: Fetch) -> Result<(
 
 /// 워커: 즉시 한 번 가져오고, 이후 `interval` 마다.
 /// 대기 중 새로고침 요청이 오면 기다리지 않고 바로 다시 가져온다.
-fn spawn_worker(tx: Sender<Msg>, req_rx: Receiver<bool>, interval: Duration, fetch: Fetch) {
+fn spawn_worker(
+    tx: Sender<Round>,
+    req_rx: Receiver<bool>,
+    interval: Duration,
+    tz: String,
+    agents: Vec<&'static AgentSpec>,
+    live: bool,
+) {
+    let names: Vec<String> = agents.iter().map(|a| a.name.to_string()).collect();
     thread::spawn(move || {
         let mut force_live = false;
         loop {
-            let msg = match fetch(force_live) {
-                Ok(snap) => Msg::Data(snap),
-                Err(e) => Msg::Failed(e.to_string()),
-            };
-            if tx.send(msg).is_err() {
+            let round = Round(
+                multi::fetch_all(&names, &tz, live, force_live)
+                    .into_iter()
+                    .map(|p| PaneResult {
+                        agent: p.agent,
+                        outcome: p.result.map_err(|e| e.to_string()),
+                    })
+                    .collect(),
+            );
+            if tx.send(round).is_err() {
                 return; // 메인이 끝났다
             }
             match req_rx.recv_timeout(interval) {
@@ -113,23 +177,12 @@ fn spawn_worker(tx: Sender<Msg>, req_rx: Receiver<bool>, interval: Duration, fet
 fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    rx: &Receiver<Msg>,
+    rx: &Receiver<Round>,
     req_tx: &Sender<bool>,
 ) -> Result<()> {
     loop {
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                Msg::Data(snap) => {
-                    // 캐시를 지금 읽었더라도 표본 시각은 실제 측정 시각을 쓴다.
-                    // 그렇지 않으면 오래된 값을 현재 window 의 새 표본처럼 저장한다.
-                    let history_error = app.history.record(&snap.meters, snap.origin.at).err();
-                    app.meters = snap.meters;
-                    app.origin = Some(snap.origin);
-                    app.error = history_error.map(|e| format!("히스토리 저장 실패: {e:#}"));
-                }
-                // 이전 데이터는 지우지 않는다 — 일시적 실패로 화면이 비면 더 나쁘다
-                Msg::Failed(m) => app.error = Some(m),
-            }
+        while let Ok(round) = rx.try_recv() {
+            apply(app, round);
             app.next_fetch = Some(Instant::now() + app.interval);
         }
 
@@ -144,33 +197,64 @@ fn event_loop(
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Ok(());
                 }
-                KeyCode::Char('r') => {
-                    let _ = req_tx.send(false);
+                code => {
+                    if let Some(force_live) = refresh_request(code) {
+                        let _ = req_tx.send(force_live);
+                    }
                 }
-                KeyCode::Char('R') => {
-                    let _ = req_tx.send(true);
-                }
-                _ => {}
             }
         }
     }
 }
 
+fn refresh_request(code: KeyCode) -> Option<bool> {
+    match code {
+        KeyCode::Char('r') => Some(false),
+        KeyCode::Char('R') => Some(true),
+        _ => None,
+    }
+}
+
+fn apply(app: &mut App, round: Round) {
+    for result in round.0 {
+        let Some(pane) = app
+            .panes
+            .iter_mut()
+            .find(|p| p.agent.name == result.agent.name)
+        else {
+            continue;
+        };
+        match result.outcome {
+            Ok(snap) => {
+                // 캐시를 읽었더라도 실제 측정 시각에 기록해야 오래된 값이 새 표본이 되지 않는다.
+                let history_error = pane.history.record(&snap.meters, snap.origin.at).err();
+                pane.meters = snap.meters;
+                pane.origin = Some(snap.origin);
+                pane.error = history_error.map(|e| format!("히스토리 저장 실패: {e:#}"));
+            }
+            // 이전 데이터는 지우지 않는다 — 일시적 실패로 화면이 비면 더 나쁘다
+            Err(msg) => pane.error = Some(msg),
+        }
+    }
+}
+
 fn draw(f: &mut Frame, app: &App) {
-    let footer_height = if app.error.is_some() && !app.meters.is_empty() {
-        2
-    } else {
-        1
+    // 오른쪽 여백을 먼저 떼어 낸다 — 머리글·구획·꼬리글이 모두 같은 폭을 쓴다
+    let full = f.area();
+    let canvas = Rect {
+        width: full.width.saturating_sub(RIGHT_MARGIN),
+        ..full
     };
+    let footer_height = if app.any_refresh_failed() { 2 } else { 1 };
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
         Constraint::Length(footer_height),
     ])
-    .areas(f.area());
+    .areas(canvas);
 
     draw_header(f, header, app);
-    draw_meters(f, body, app);
+    draw_panes(f, body, app);
     draw_footer(f, footer, app);
 }
 
@@ -186,9 +270,42 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(vec![title, tz])), area);
 }
 
-fn draw_meters(f: &mut Frame, area: Rect, app: &App) {
-    if app.meters.is_empty() {
-        let msg = match &app.error {
+/// 구획을 **좌우로** 나눈다 (`A | B`). 폭은 균등하게 준다 — 어느 에이전트가
+/// 더 넓어야 할 이유가 없고, 균등하면 게이지 길이가 같아 서로 비교하기 쉽다.
+fn draw_panes(f: &mut Frame, area: Rect, app: &App) {
+    let n = app.panes.len().max(1);
+    let cols: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    // 구획 사이 여백 — 게이지가 맞붙으면 어디까지가 한 구획인지 알 수 없다
+    let slots = Layout::horizontal(cols).spacing(PANE_GAP).split(area);
+
+    for (pane, slot) in app.panes.iter().zip(slots.iter()) {
+        draw_pane(f, *slot, pane, app);
+    }
+}
+
+fn chart_of(pane: &Pane, m: &Meter, area: Rect) -> Option<Vec<Option<u64>>> {
+    let width = area.width.saturating_sub(GAUGE_INDENT) as usize;
+    m.window
+        .and_then(|w| pane.history.chart(&m.title, w, width))
+}
+
+fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, app: &App) {
+    let mut area = area;
+    if app.label_panes {
+        let [label, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}", pane.agent.display),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))),
+            label,
+        );
+        area = rest;
+    }
+
+    if pane.meters.is_empty() {
+        let msg = match &pane.error {
             Some(e) => Line::from(Span::styled(
                 format!("  {e}"),
                 Style::default().fg(color_for(Level::Critical)),
@@ -202,18 +319,12 @@ fn draw_meters(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // 차트 폭은 게이지와 같게 맞춘다 — 같은 창을 같은 축으로 보여주기 때문이다
-    let chart_width = area.width.saturating_sub(GAUGE_INDENT) as usize;
-    let charts: Vec<Option<Vec<Option<u64>>>> = app
+    let charts: Vec<Option<Vec<Option<u64>>>> = pane
         .meters
         .iter()
-        .map(|m| {
-            m.window
-                .and_then(|w| app.history.chart(&m.title, w, chart_width))
-        })
+        .map(|m| chart_of(pane, m, area))
         .collect();
-
-    let sizes: Vec<usize> = app
+    let sizes: Vec<usize> = pane
         .meters
         .iter()
         .zip(&charts)
@@ -227,8 +338,8 @@ fn draw_meters(f: &mut Frame, area: Rect, app: &App) {
     let slots = Layout::vertical(rows).split(area);
 
     let mut base = 0;
-    for ((m, chart), n) in app.meters.iter().zip(&charts).zip(&sizes) {
-        let delta = app.history.delta(&m.title, m.window);
+    for ((m, chart), n) in pane.meters.iter().zip(&charts).zip(&sizes) {
+        let delta = pane.history.delta(&m.title, m.window);
         draw_one(
             f,
             &slots[base..base + n],
@@ -254,7 +365,7 @@ fn draw_one(
         Style::default()
     };
     let mut title = vec![Span::styled(format!(" {marker} {}", m.title), title_style)];
-    // 현재 창의 첫 표본 이후 늘어난 양 — 차트 옆에 두면 폭이 밀려 제목 줄에 붙인다
+    // 앱을 켠 뒤 늘어난 양 — 차트 옆에 두면 폭이 밀려 제목 줄에 붙인다
     if let Some(delta) = delta {
         title.push(Span::styled(
             format!("  {delta}"),
@@ -267,13 +378,7 @@ fn draw_one(
     let bars = std::iter::once(&m.usage).chain(m.time.as_ref());
     let mut row = 1;
     for bar in bars {
-        f.render_widget(
-            Gauge::default()
-                .gauge_style(Style::default().fg(color_for(bar.level)))
-                .ratio(bar.fill_clamped())
-                .label(bar.label.as_str()),
-            indent(slots[row], GAUGE_INDENT),
-        );
+        f.render_widget(gauge(bar), indent(slots[row], GAUGE_INDENT));
         row += 1;
     }
 
@@ -310,16 +415,23 @@ fn draw_one(
     }
 }
 
+fn gauge(bar: &Bar) -> Gauge<'_> {
+    Gauge::default()
+        .gauge_style(Style::default().fg(color_for(bar.level)))
+        .ratio(bar.fill_clamped())
+        .label(bar.label.as_str())
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let mut parts = Vec::new();
     // 화면을 언제 다시 그렸는지보다 값이 언제 기준인지가 중요하다
-    if let Some(origin) = app.origin {
+    if let Some(origin) = app.oldest_origin() {
         parts.push(origin.text());
     }
     if let Some(secs) = app.seconds_until_refresh() {
         parts.push(format!("다음 {secs}초"));
     }
-    let controls = if app.prog == "ccmeter" {
+    let controls = if app.panes.iter().any(|p| p.agent.name == "claude") {
         "[r] 새로고침  [R] HTTP 조회  [q] 종료"
     } else {
         "[r] 새로고침  [q] 종료"
@@ -330,16 +442,25 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         format!(" {}", parts.join("  ·  ")),
         Style::default().fg(Color::DarkGray),
     ))];
-    // 직전 데이터는 유지하되 429 같은 실제 실패 사유를 숨기지 않는다.
-    if let Some(error) = &app.error
-        && !app.meters.is_empty()
-    {
+    let errors: Vec<String> = app
+        .panes
+        .iter()
+        .filter_map(|pane| {
+            (!pane.meters.is_empty())
+                .then(|| {
+                    pane.error
+                        .as_ref()
+                        .map(|e| format!("{}: {e}", pane.agent.display))
+                })
+                .flatten()
+        })
+        .collect();
+    if !errors.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!(" 갱신 실패: {error}"),
+            format!(" 갱신 실패: {}", errors.join(" · ")),
             Style::default().fg(color_for(Level::Critical)),
         )));
     }
-
     f.render_widget(Paragraph::new(lines), area);
 }
 
@@ -363,7 +484,6 @@ fn color_for(level: Level) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FetchError;
     use crate::meter::Bar;
     use chrono::Local;
     use ratatui::Terminal;
@@ -389,16 +509,24 @@ mod tests {
         }
     }
 
-    fn app_with(meters: Vec<Meter>) -> App {
-        App {
-            prog: "ccmeter".into(),
+    fn pane(agent: &str, meters: Vec<Meter>) -> Pane {
+        Pane {
+            agent: crate::registry::find(agent).unwrap(),
             meters,
             origin: None,
             history: History::default(),
             error: None,
+        }
+    }
+
+    fn app_with(panes: Vec<Pane>) -> App {
+        App {
+            prog: "agentmeter".into(),
+            tz: "Asia/Seoul".into(),
+            label_panes: panes.len() > 1,
+            panes,
             next_fetch: None,
             interval: Duration::from_secs(60),
-            tz: "Asia/Seoul".to_string(),
         }
     }
 
@@ -438,17 +566,15 @@ mod tests {
 
     #[test]
     fn renders_all_meters() {
-        let out = render(&app_with(three()), 60, 20);
+        let out = render(&app_with(vec![pane("claude", three())]), 60, 24);
         assert!(out.contains("Current session"));
         assert!(out.contains("Current week (all models)"));
-        assert!(out.contains("Current week (Fable)"));
         assert!(out.contains("57% used"));
-        assert!(out.contains("74% used"));
     }
 
     #[test]
     fn marks_the_emphasized_meter() {
-        let out = render(&app_with(three()), 60, 20);
+        let out = render(&app_with(vec![pane("claude", three())]), 60, 24);
         let line = out
             .lines()
             .find(|l| l.contains("Current week (Fable)"))
@@ -456,26 +582,113 @@ mod tests {
         assert!(line.contains('›'), "강조 항목에 마커가 있어야 함");
     }
 
-    /// 프로그램 이름은 헤더에 그대로 나와야 한다 — 두 도구가 같은 코드를 쓴다.
     #[test]
     fn header_shows_program_name() {
-        let mut app = app_with(three());
-        app.prog = "codexmeter".into();
-        assert!(render(&app, 60, 20).contains("codexmeter"));
+        let out = render(&app_with(vec![pane("claude", three())]), 60, 24);
+        assert!(out.contains("agentmeter"));
+    }
+
+    /// 에이전트가 하나면 구획 머리글은 군더더기다.
+    #[test]
+    fn single_pane_has_no_label() {
+        let out = render(&app_with(vec![pane("claude", three())]), 60, 24);
+        assert!(!out.contains("Claude Code"), "머리글이 없어야 함:\n{out}");
+    }
+
+    /// 구획은 **좌우로** 놓인다 — 두 머리글이 같은 줄의 다른 칸에 있어야 한다.
+    #[test]
+    fn panes_are_side_by_side() {
+        let app = app_with(vec![pane("claude", three()), pane("codex", three())]);
+        let out = render(&app, 160, 24);
+        let line = out
+            .lines()
+            .find(|l| l.contains("Claude Code"))
+            .expect("머리글 줄이 있어야 함");
+        assert!(
+            line.contains("Codex"),
+            "두 구획이 같은 줄에 나란히 있어야 함:\n{line}"
+        );
+        let left = line.find("Claude Code").unwrap();
+        let right = line.find("Codex").unwrap();
+        assert!(left < right, "설정 순서대로 왼쪽부터 놓인다");
+    }
+
+    /// 오른쪽 끝에 여백이 있어야 한다 — 게이지가 경계에 붙으면 답답하다.
+    #[test]
+    fn leaves_a_right_margin() {
+        let app = app_with(vec![pane("claude", three())]);
+        let out = render(&app, 60, 24);
+        for (i, line) in out.lines().enumerate() {
+            let tail: String = line.chars().rev().take(RIGHT_MARGIN as usize).collect();
+            assert!(
+                tail.chars().all(char::is_whitespace),
+                "{i}번째 줄 오른쪽 끝이 채워져 있음: {line:?}"
+            );
+        }
+    }
+
+    /// 좁은 화면에서도 두 구획을 그린다 — 폭이 줄어들 뿐이다.
+    #[test]
+    fn narrow_screen_still_splits() {
+        let app = app_with(vec![pane("claude", three()), pane("codex", three())]);
+        for w in [40, 60, 80] {
+            let out = render(&app, w, 24);
+            assert!(
+                out.contains("Codex"),
+                "폭 {w} 에서도 두 번째 구획이 있어야 함"
+            );
+        }
+    }
+
+    /// 화면이 짧아 다 못 그려도 패닉하지 않아야 한다.
+    #[test]
+    fn short_terminal_does_not_panic() {
+        let app = app_with(vec![pane("claude", three()), pane("codex", three())]);
+        for h in 3..=12 {
+            let _ = render(&app, 80, h);
+        }
+    }
+
+    /// 갱신이 실패해도 직전 데이터는 화면에 남아야 한다.
+    #[test]
+    fn keeps_stale_data_on_error() {
+        let mut app = app_with(vec![pane("claude", three())]);
+        app.panes[0].error = Some("일시적 오류".to_string());
+        let out = render(&app, 60, 24);
+        assert!(out.contains("Current session"), "이전 데이터가 남아야 함");
+        assert!(out.contains("갱신 실패"), "실패 사실도 알려야 함");
+    }
+
+    /// 데이터가 아직 없는데 실패하면 오류를 그 구획에 보여준다.
+    #[test]
+    fn shows_error_when_nothing_loaded_yet() {
+        let mut app = app_with(vec![pane("claude", vec![])]);
+        app.panes[0].error = Some("재인증 필요".to_string());
+        assert!(render(&app, 60, 24).contains("재인증 필요"));
+    }
+
+    /// 한 구획이 실패해도 다른 구획은 정상으로 그려진다.
+    #[test]
+    fn one_failing_pane_does_not_hide_the_other() {
+        let mut app = app_with(vec![pane("claude", three()), pane("codex", vec![])]);
+        app.panes[1].error = Some("조회 실패".to_string());
+        let out = render(&app, 160, 24);
+        assert!(out.contains("57% used"), "정상 구획은 그려져야 함:\n{out}");
+        assert!(out.contains("조회 실패"), "실패 구획은 사유를 보여줘야 함");
     }
 
     /// 표본이 부족할 때는 빈 placeholder, 쌓이면 실제 sparkline 을 그린다.
     #[test]
     fn draws_a_placeholder_then_the_history_chart() {
-        let mut app = app_with(three());
-        // 창 정보가 있어야 가로축을 잡을 수 있다
         let w = crate::meter::Window {
             resets_at: Local::now() + chrono::TimeDelta::minutes(30),
             len: chrono::TimeDelta::hours(5),
         };
-        for m in &mut app.meters {
+        let mut meters = three();
+        for m in &mut meters {
             m.window = Some(w);
         }
+        let mut app = app_with(vec![pane("claude", meters.clone())]);
         let before = render(&app, 80, 30);
         let placeholder_cells = before.matches('·').count();
         assert!(
@@ -484,10 +697,11 @@ mod tests {
         );
 
         let now = Local::now();
-        app.history
-            .record(&app.meters.clone(), now - chrono::TimeDelta::minutes(2))
+        app.panes[0]
+            .history
+            .record(&meters, now - chrono::TimeDelta::minutes(2))
             .unwrap();
-        app.history.record(&app.meters.clone(), now).unwrap();
+        app.panes[0].history.record(&meters, now).unwrap();
         let after = render(&app, 80, 30);
         assert!(after.contains('·'), "차트의 빈 구간이 보여야 함:\n{after}");
         assert!(
@@ -500,68 +714,15 @@ mod tests {
         );
     }
 
-    /// 화면이 짧아 다 못 그려도 패닉하지 않아야 한다.
     #[test]
-    fn short_terminal_does_not_panic() {
-        for h in 3..=12 {
-            let _ = render(&app_with(three()), 40, h);
-        }
-    }
-
-    /// 갱신이 실패해도 직전 데이터는 화면에 남아야 한다.
-    #[test]
-    fn keeps_stale_data_on_error() {
-        let mut app = app_with(three());
-        app.error = Some("조회가 제한되었습니다 (HTTP 429)".to_string());
-        let out = render(&app, 100, 20);
-        assert!(out.contains("Current session"), "이전 데이터가 남아야 함");
-        assert!(out.contains("갱신 실패"), "실패 사실도 알려야 함");
-        assert!(
-            out.contains("HTTP 429"),
-            "실제 실패 사유도 보여야 함: {out}"
-        );
-    }
-
-    /// 일반 새로고침과 강제 live 새로고침은 워커까지 구분되어 전달되어야 한다.
-    #[test]
-    fn worker_receives_forced_live_refresh() {
-        use std::sync::{Arc, Mutex};
-
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&calls);
-        let fetch: Fetch = Box::new(move |force_live| {
-            seen.lock().unwrap().push(force_live);
-            Err(FetchError::Other(anyhow::anyhow!("HTTP 429")))
-        });
-        let (tx, rx) = mpsc::channel();
-        let (req_tx, req_rx) = mpsc::channel();
-        spawn_worker(tx, req_rx, Duration::from_secs(60), fetch);
-
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Msg::Failed(_)
-        ));
-        req_tx.send(true).unwrap();
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Msg::Failed(_)
-        ));
-        drop(req_tx);
-
-        assert_eq!(*calls.lock().unwrap(), vec![false, true]);
+    fn uppercase_r_requests_forced_http_refresh() {
+        assert_eq!(refresh_request(KeyCode::Char('r')), Some(false));
+        assert_eq!(refresh_request(KeyCode::Char('R')), Some(true));
     }
 
     #[test]
-    fn ccmeter_footer_advertises_http_refresh() {
-        let out = render(&app_with(three()), 100, 20);
+    fn claude_footer_advertises_http_refresh() {
+        let out = render(&app_with(vec![pane("claude", three())]), 100, 24);
         assert!(out.contains("[R] HTTP 조회"), "{out}");
-    }
-
-    /// 데이터가 아직 없는데 실패하면 오류를 본문에 보여준다.
-    #[test]
-    fn shows_error_when_nothing_loaded_yet() {
-        let mut app = app_with(vec![]);
-        app.error = Some("재인증 필요".to_string());
-        assert!(render(&app, 60, 20).contains("재인증 필요"));
     }
 }

@@ -251,7 +251,10 @@ mod tests {
         let time = meters[0].time.as_ref().expect("자리는 채워져야 한다");
         assert_eq!(time.label, "not started");
         assert_eq!(time.fill, 0.0);
-        assert!(meters[0].footnote.is_none(), "리셋 시각을 모르면 각주는 없다");
+        assert!(
+            meters[0].footnote.is_none(),
+            "리셋 시각을 모르면 각주는 없다"
+        );
     }
 
     /// 서버가 실제로 보내는 `severity: "warning"` 이 색 등급으로 이어지는지.

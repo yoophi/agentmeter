@@ -9,8 +9,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::meter::{
-    Bar, Level, Meter, Window, level_from_used, pending_bar, resets_text, time_bar,
-    window_title,
+    Bar, Level, Meter, Window, level_from_used, pending_bar, resets_text, time_bar, window_title,
 };
 
 /// 세션 한도 창 길이. 응답이 창 길이를 알려주지 않아 상수로 둔다

@@ -1,9 +1,12 @@
 pub mod app;
 pub mod claude;
 pub mod cli;
-pub mod history;
 pub mod codex;
+pub mod config;
+pub mod history;
 pub mod meter;
+pub mod multi;
+pub mod registry;
 pub mod render;
 
 /// 두 도구가 공유하는 조회 실패 표현.

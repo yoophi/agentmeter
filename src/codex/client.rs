@@ -45,7 +45,9 @@ fn spawn() -> anyhow::Result<Child> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| {
-            format!("`{bin} app-server` 를 실행할 수 없습니다. Codex CLI 가 설치되어 있는지 확인하세요")
+            format!(
+                "`{bin} app-server` 를 실행할 수 없습니다. Codex CLI 가 설치되어 있는지 확인하세요"
+            )
         })
 }
 

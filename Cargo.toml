@@ -13,6 +13,8 @@ iana-time-zone = "0.1.65"
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+toml = "1.1.4"
+unicode-width = "0.2.2"
 ureq = "3.4.0"
 
 [dev-dependencies]
@@ -29,3 +31,7 @@ path = "src/bin/ccmeter.rs"
 [[bin]]
 name = "codexmeter"
 path = "src/bin/codexmeter.rs"
+
+[[bin]]
+name = "agentmeter"
+path = "src/bin/agentmeter.rs"
