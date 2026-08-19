@@ -34,7 +34,11 @@ pub fn render(snap: &Snapshot, color: bool, width: usize) -> String {
 }
 
 fn render_one(m: &Meter, color: bool, gauge_width: usize) -> String {
-    let (b, mu, r) = if color { (BOLD, MUTED, RESET) } else { ("", "", "") };
+    let (b, mu, r) = if color {
+        (BOLD, MUTED, RESET)
+    } else {
+        ("", "", "")
+    };
     let marker = if m.emphasized { "› " } else { "  " };
 
     let mut s = String::new();
@@ -55,7 +59,11 @@ fn render_one(m: &Meter, color: bool, gauge_width: usize) -> String {
 fn render_bar(bar: &Bar, color: bool, gauge_width: usize) -> String {
     let filled = (bar.fill_clamped() * gauge_width as f64).round() as usize;
 
-    let (d, mu, r) = if color { (DIM, MUTED, RESET) } else { ("", "", "") };
+    let (d, mu, r) = if color {
+        (DIM, MUTED, RESET)
+    } else {
+        ("", "", "")
+    };
     let a = if color { ansi_for(bar.level) } else { "" };
     // 색이 꺼진 환경에서는 색만으로 채움/빈칸을 구분할 수 없으므로 글자를 바꾼다
     let empty_ch = if color { "█" } else { "░" };
@@ -243,7 +251,10 @@ mod tests {
     #[test]
     fn no_color_emits_no_escape_codes() {
         let out = render(&snap(0.5, false), false, 80);
-        assert!(!out.contains('\x1b'), "색 비활성화 시 escape 코드가 없어야 함");
+        assert!(
+            !out.contains('\x1b'),
+            "색 비활성화 시 escape 코드가 없어야 함"
+        );
     }
 
     #[test]
@@ -318,7 +329,10 @@ mod tests {
         let out = render_panes(&panes, false, 60);
         let head = out.lines().next().unwrap();
         assert!(head.contains("[Claude Code]"));
-        assert!(!head.contains("[Codex]"), "좁으면 같은 줄에 두지 않는다: {head}");
+        assert!(
+            !head.contains("[Codex]"),
+            "좁으면 같은 줄에 두지 않는다: {head}"
+        );
         assert!(out.contains("[Codex]"), "아래에 있어야 함");
     }
 

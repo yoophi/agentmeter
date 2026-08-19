@@ -4,11 +4,12 @@ Claude Code 의 `/usage` 가 보여주는 값을 그대로 가져옵니다.
 
 ## 값의 출처
 
-한도 값을 얻는 경로는 세 가지가 있고, 그중 둘만 씁니다.
+한도 값을 얻는 경로는 네 가지가 있고, 그중 두 종류(캐시와 직접 조회)를 씁니다.
 
 | 경로 | 내용 | 채택 |
 |---|---|---|
 | `~/.claude/token-scope-oauth-usage.json` | Claude Code 가 캐시해 둔 응답 | **1차** |
+| `~/.cache/agentmeter/claude-usage.json` | 마지막 직접 조회 성공 응답 | **1차** |
 | `GET /api/oauth/usage` | 직접 조회 | 캐시가 낡았을 때만 |
 | `anthropic-ratelimit-unified-*` 응답 헤더 | 추론 요청의 응답에 실려 옴 | ✗ 쓸 수 없음 |
 | `~/.claude/projects/**/*.jsonl` 집계 | 로컬 대화 기록 | ✗ 부정확 |
@@ -47,7 +48,7 @@ flowchart TD
     B -->|아니오| D{최근 5분 안에<br/>조회에 실패했나?}
     D -->|예| H
     D -->|아니오| F[HTTP 조회]
-    F -->|성공| G[백오프 해제<br/>origin = Live]
+    F -->|성공| G[agentmeter 캐시 저장<br/>백오프 해제<br/>origin = Live]
     F -->|실패| H{캐시가 있나?}
     H -->|예| E[캐시 값 사용<br/>origin = Cache · 갱신 실패]
     H -->|아니오| I[오류 반환]
@@ -59,6 +60,8 @@ flowchart TD
 - `MAX_AGE` = 15분. 세션 창은 5시간, 주간 창은 7일이라 몇 분 차이는 화면에 드러나지 않습니다.
 - `NEG_TTL` = 5분. 실패 후 이만큼은 다시 두드리지 않습니다.
 - `--live` 는 캐시를 건너뛰고 항상 직접 조회합니다.
+- TUI의 `r`은 캐시 우선 조회, `R`은 캐시와 백오프를 건너뛴 HTTP 직접 조회입니다.
+  `R`이 실패하면 직전 데이터와 함께 실제 오류 문구를 표시합니다.
 
 ### 캐시 파일
 
@@ -70,13 +73,15 @@ flowchart TD
 }
 ```
 
-`usage` 안에 `/api/oauth/usage` 응답이 **통째로** 들어 있어, 직접 조회와 같은
-타입(`UsageResponse`)으로 파싱합니다. `captured_at` 덕분에 얼마나 낡았는지
-정확히 알 수 있습니다.
+`usage` 안에 `/api/oauth/usage` 응답이 들어 있어, 직접 조회와 같은
+타입(`UsageResponse`)으로 파싱합니다. 두 캐시 중 `captured_at` 이 최신인 값을
+고르므로 얼마나 낡았는지 정확히 알 수 있습니다.
 
 **이 파일의 갱신은 우리가 유도할 수 없습니다.** `claude -p "..."` 로 추론 요청을
 보내도 파일은 그대로였습니다(실측). Claude Code 가 자체 판단으로 갱신합니다.
-그래서 낡았을 때 직접 조회 말고는 방법이 없습니다.
+그래서 낡았을 때 직접 조회 말고는 방법이 없습니다. 직접 조회에 성공하면 ccmeter 는
+필요한 정규화 값(`limits`)을 agentmeter 전용 캐시에 원자적으로 저장합니다. 이후
+요청이 429 를 받아도 Claude Code 의 더 오래된 캐시로 회귀하지 않습니다.
 
 ### 실패 백오프
 
@@ -85,6 +90,15 @@ flowchart TD
 
 재인증 오류(`401`/`403`)에는 백오프를 걸지 않습니다. 사용자가 로그인하면
 즉시 반영되어야 하기 때문입니다.
+
+### 창별 히스토리
+
+TUI가 수집한 사용률은 실제 측정 시각을 기준으로
+`~/.cache/agentmeter/history/` 아래에 저장합니다. 5시간 세션과 7일 한도는 각각
+`claude__5H__YYYYMMDDHHMMSS__YYYYMMDDHHMMSS.json`,
+`claude__7D__YYYYMMDDHHMMSS__YYYYMMDDHHMMSS.json` 파일을 사용합니다.
+재실행 시 길이와 리셋 시각이 모두 같은 파일만 복원하므로 이전 한도 창의 사용률이
+현재 차트나 변화량에 섞이지 않습니다.
 
 ## 응답 형태
 

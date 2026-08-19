@@ -16,7 +16,7 @@ pub struct Pane {
 }
 
 /// 설정에 적힌 순서대로 조회한다. 순서가 화면 순서다.
-pub fn fetch_all(agents: &[String], tz: &str, live: bool) -> Vec<Pane> {
+pub fn fetch_all(agents: &[String], tz: &str, live: bool, force_live: bool) -> Vec<Pane> {
     let specs: Vec<&'static AgentSpec> = agents.iter().filter_map(|n| registry::find(n)).collect();
 
     thread::scope(|scope| {
@@ -25,7 +25,7 @@ pub fn fetch_all(agents: &[String], tz: &str, live: bool) -> Vec<Pane> {
             .map(|spec| {
                 let tz = tz.to_string();
                 let make = spec.make_fetch;
-                scope.spawn(move || (make)(tz, live)())
+                scope.spawn(move || (make)(tz, live)(force_live))
             })
             .collect();
 
@@ -51,7 +51,7 @@ mod tests {
     /// 모르는 이름은 조용히 건너뛴다 — 검증은 설정을 읽을 때 이미 했다.
     #[test]
     fn unknown_agents_are_skipped() {
-        let panes = fetch_all(&["gopher".to_string()], "Asia/Seoul", false);
+        let panes = fetch_all(&["gopher".to_string()], "Asia/Seoul", false, false);
         assert!(panes.is_empty());
     }
 
@@ -61,6 +61,7 @@ mod tests {
         let panes = fetch_all(
             &["codex".to_string(), "claude".to_string()],
             "Asia/Seoul",
+            false,
             false,
         );
         let names: Vec<&str> = panes.iter().map(|p| p.agent.name).collect();

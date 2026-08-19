@@ -144,7 +144,10 @@ mod tests {
         let e = parse("agents = [\"claude\", \"gopher\"]").unwrap_err();
         let msg = format!("{e:#}");
         assert!(msg.contains("gopher"), "{msg}");
-        assert!(msg.contains("claude"), "쓸 수 있는 이름을 알려줘야 함: {msg}");
+        assert!(
+            msg.contains("claude"),
+            "쓸 수 있는 이름을 알려줘야 함: {msg}"
+        );
     }
 
     #[test]

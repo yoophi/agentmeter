@@ -16,7 +16,7 @@ use crate::render::{self, plain};
 use crate::{FetchError, local_tz};
 
 /// 한 번 조회해 화면 표현을 만든다. 상주 모드에서는 워커 스레드가 반복 호출한다.
-pub type Fetch = Box<dyn Fn() -> Result<Snapshot, FetchError> + Send>;
+pub type Fetch = Box<dyn Fn(bool) -> Result<Snapshot, FetchError> + Send>;
 
 /// 단일 에이전트 전용 진입점. `agent` 는 [`registry`] 의 이름이다.
 pub fn main_single(prog: &'static str, about: &'static str, agent: &'static str) -> ExitCode {
@@ -83,7 +83,7 @@ fn run(prog: &'static str, args: &Cli, specs: Vec<&'static AgentSpec>) -> Result
 
 fn fetch(specs: &[&'static AgentSpec], tz: &str, live: bool) -> Vec<multi::Pane> {
     let names: Vec<String> = specs.iter().map(|s| s.name.to_string()).collect();
-    multi::fetch_all(&names, tz, live)
+    multi::fetch_all(&names, tz, live, false)
 }
 
 fn once(args: &Cli, is_tty: bool, specs: &[&'static AgentSpec], tz: &str) -> Result<ExitCode> {
@@ -172,7 +172,10 @@ mod tests {
             let (text, ok) = once_output("ccmeter", false, 80, &Err(err));
             assert!(!ok, "실패는 실패 코드여야 함");
             assert!(text.contains(&expect), "본문에 사유가 있어야 함: {text}");
-            assert!(text.starts_with("ccmeter:"), "프로그램 이름으로 시작: {text}");
+            assert!(
+                text.starts_with("ccmeter:"),
+                "프로그램 이름으로 시작: {text}"
+            );
         }
     }
 }

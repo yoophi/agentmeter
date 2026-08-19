@@ -1,9 +1,9 @@
 pub mod app;
 pub mod claude;
 pub mod cli;
+pub mod codex;
 pub mod config;
 pub mod history;
-pub mod codex;
 pub mod meter;
 pub mod multi;
 pub mod registry;

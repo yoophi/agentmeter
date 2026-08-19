@@ -184,7 +184,7 @@ src/
   meter.rs        공통 화면 표현 (제목·게이지 두 줄·각주) + 문구·창 진행률 계산
   app.rs          모드 분기와 실행 로직
   cli.rs          공통 옵션
-  history.rs      실행 후 사용률 변화와 텍스트 차트 (상주 모드)
+  history.rs      한도 창별 사용률 영속 기록과 Sparkline 차트
   config.rs       설정 파일 (표시할 에이전트)
   registry.rs     이름 → 에이전트 표
   multi.rs        여러 에이전트 동시 조회

@@ -195,7 +195,10 @@ mod tests {
         assert_eq!(meters.len(), 1);
         assert_eq!(meters[0].title, "Current week (all models)");
         assert_eq!(meters[0].usage.label, "42% used");
-        assert!(meters[0].footnote.is_none(), "resetsAt 이 없으면 각주도 없다");
+        assert!(
+            meters[0].footnote.is_none(),
+            "resetsAt 이 없으면 각주도 없다"
+        );
         // 시간 게이지는 자리를 지킨다 (창 미시작 표시)
         assert_eq!(meters[0].time.as_ref().unwrap().label, "not started");
     }
@@ -244,8 +247,11 @@ mod tests {
         let r: RateLimitsResponse = serde_json::from_str(&body).unwrap();
         let meters = to_meters(&r, "Asia/Seoul");
         let time = meters[0].time.as_ref().expect("시간 게이지가 있어야 함");
-        assert!(time.label.starts_with("1 day 23 hour") || time.label.starts_with("2 day 0 hour"),
-            "{}", time.label);
+        assert!(
+            time.label.starts_with("1 day 23 hour") || time.label.starts_with("2 day 0 hour"),
+            "{}",
+            time.label
+        );
         // 7일 창에서 2일 남았으면 5/7 만큼 지났다
         assert!((time.fill - 5.0 / 7.0).abs() < 0.01, "fill={}", time.fill);
     }

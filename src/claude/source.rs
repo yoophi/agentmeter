@@ -1,8 +1,9 @@
 //! 한도 값을 어디서 가져올지 정한다.
 //!
-//! Claude Code 는 `/api/oauth/usage` 응답을 통째로
-//! `~/.claude/token-scope-oauth-usage.json` 에 캐시해 둔다.
-//! 그 파일을 읽으면 네트워크 호출이 없으므로 즉시 응답하고 `HTTP 429` 도 없다.
+//! Claude Code 는 `/api/oauth/usage` 응답을
+//! `~/.claude/token-scope-oauth-usage.json` 에 캐시해 둔다. 직접 조회에 성공한 값은
+//! agentmeter 전용 캐시에도 보존한다. 둘 중 최신 파일을 읽으면 네트워크 호출이
+//! 없으므로 즉시 응답하고 `HTTP 429` 도 없다.
 //!
 //! 다만 Claude Code 가 갱신해 줄 때까지 값이 멈춰 있고, 우리가 갱신을 유도할
 //! 방법은 없다 — `claude -p` 로 추론 요청을 보내도 이 파일은 그대로였다.
@@ -17,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use chrono::{DateTime, Local, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::api;
 use super::model::{UsageResponse, to_meters};
@@ -32,6 +33,7 @@ pub const MAX_AGE: Duration = Duration::from_secs(15 * 60);
 pub const NEG_TTL: Duration = Duration::from_secs(5 * 60);
 
 const CACHE_REL: &str = ".claude/token-scope-oauth-usage.json";
+const AGENT_CACHE_REL: &str = ".cache/agentmeter/claude-usage.json";
 const FAIL_MARKER_REL: &str = ".cache/agentmeter/claude-usage.err";
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +41,12 @@ struct CacheFile {
     captured_at: String,
     /// `/api/oauth/usage` 응답이 그대로 들어 있다.
     usage: UsageResponse,
+}
+
+#[derive(Serialize)]
+struct CacheFileRef<'a> {
+    captured_at: String,
+    usage: &'a UsageResponse,
 }
 
 fn home_path(rel: &str) -> Option<PathBuf> {
@@ -81,6 +89,9 @@ pub fn fetch(tz: &str) -> Result<Snapshot, FetchError> {
 pub fn fetch_live(tz: &str) -> Result<Snapshot, FetchError> {
     match api::fetch_response() {
         Ok(resp) => {
+            // Claude Code 의 캐시는 갱신되지 않을 수 있다. 방금 받은 값을 별도로
+            // 보존해야 다음 요청이 429 여도 오래된 Claude 캐시로 회귀하지 않는다.
+            let _ = write_agent_cache(Local::now(), &resp);
             clear_backoff();
             Ok(Snapshot::live(to_meters(&resp.limits, tz)))
         }
@@ -109,7 +120,39 @@ fn is_stale(at: DateTime<Local>) -> bool {
 }
 
 fn read_cache() -> Option<(DateTime<Local>, UsageResponse)> {
-    parse_cache(&std::fs::read_to_string(home_path(CACHE_REL)?).ok()?).ok()
+    [CACHE_REL, AGENT_CACHE_REL]
+        .into_iter()
+        .filter_map(home_path)
+        .filter_map(|path| read_cache_at(&path))
+        .max_by_key(|(at, _)| *at)
+}
+
+fn read_cache_at(path: &std::path::Path) -> Option<(DateTime<Local>, UsageResponse)> {
+    parse_cache(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_agent_cache(at: DateTime<Local>, resp: &UsageResponse) -> anyhow::Result<()> {
+    let path = home_path(AGENT_CACHE_REL).context("HOME 을 찾을 수 없습니다")?;
+    write_cache_at(&path, at, resp)
+}
+
+fn write_cache_at(
+    path: &std::path::Path,
+    at: DateTime<Local>,
+    resp: &UsageResponse,
+) -> anyhow::Result<()> {
+    let parent = path.parent().context("캐시 디렉터리를 찾을 수 없습니다")?;
+    std::fs::create_dir_all(parent).context("캐시 디렉터리를 만들지 못했습니다")?;
+
+    let file = CacheFileRef {
+        captured_at: at.to_rfc3339(),
+        usage: resp,
+    };
+    let bytes = serde_json::to_vec(&file).context("usage 캐시 직렬화 실패")?;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, bytes).context("usage 임시 캐시 저장 실패")?;
+    std::fs::rename(&tmp, path).context("usage 캐시 교체 실패")?;
+    Ok(())
 }
 
 fn parse_cache(raw: &str) -> anyhow::Result<(DateTime<Local>, UsageResponse)> {
@@ -208,7 +251,10 @@ mod tests {
         let time = meters[0].time.as_ref().expect("자리는 채워져야 한다");
         assert_eq!(time.label, "not started");
         assert_eq!(time.fill, 0.0);
-        assert!(meters[0].footnote.is_none(), "리셋 시각을 모르면 각주는 없다");
+        assert!(
+            meters[0].footnote.is_none(),
+            "리셋 시각을 모르면 각주는 없다"
+        );
     }
 
     /// 서버가 실제로 보내는 `severity: "warning"` 이 색 등급으로 이어지는지.
@@ -235,6 +281,30 @@ mod tests {
     fn broken_cache_is_ignored() {
         assert!(parse_cache("{}").is_err());
         assert!(parse_cache(r#"{"captured_at":"nope","usage":{"limits":[]}}"#).is_err());
+    }
+
+    /// 직접 조회에 성공한 값은 Claude Code 의 오래된 캐시와 별도로 보존되어야 한다.
+    /// 그래야 다음 폴링이 429 를 받아도 며칠 전 값으로 되돌아가지 않는다.
+    #[test]
+    fn live_response_round_trips_through_agent_cache() {
+        let (_, resp) = parse_cache(SAMPLE).unwrap();
+        let at = DateTime::parse_from_rfc3339("2026-08-19T00:33:02+09:00")
+            .unwrap()
+            .with_timezone(&Local);
+        let path = std::env::temp_dir().join(format!(
+            "agentmeter-claude-cache-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+
+        write_cache_at(&path, at, &resp).unwrap();
+        let (loaded_at, loaded) = read_cache_at(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded_at, at);
+        assert_eq!(loaded.limits.len(), 2);
+        assert_eq!(loaded.limits[0].percent, 65.0);
+        assert_eq!(loaded.limits[1].percent, 75.0);
     }
 
     /// 낡은 캐시를 쓰는 중이면 그 사실이 화면 문구에 드러나야 한다.

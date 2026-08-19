@@ -7,7 +7,7 @@
 ```
 src/
   meter.rs        공통 화면 표현 + 문구 생성 + 창 진행률 계산
-  history.rs      실행 후 모은 사용률 변화 + 텍스트 차트
+  history.rs      한도 창별 사용률 영속 기록 + Sparkline 차트
   config.rs       설정 파일 읽기·쓰기
   registry.rs     이름 → 에이전트 표 (설정과 agentmeter 가 이것만 본다)
   multi.rs        여러 에이전트 동시 조회

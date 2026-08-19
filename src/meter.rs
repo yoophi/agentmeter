@@ -50,7 +50,7 @@ impl Bar {
 }
 
 /// 한도 창(window). 시간 게이지와 시계열 차트의 가로축이 된다.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     pub resets_at: chrono::DateTime<chrono::Local>,
     pub len: chrono::TimeDelta,
@@ -143,7 +143,10 @@ mod tests {
     #[test]
     fn resets_text_always_includes_the_date() {
         use chrono::{Local, TimeZone};
-        let at = Local.with_ymd_and_hms(2026, 8, 18, 21, 30, 0).single().unwrap();
+        let at = Local
+            .with_ymd_and_hms(2026, 8, 18, 21, 30, 0)
+            .single()
+            .unwrap();
         assert_eq!(
             resets_text(at, "Asia/Seoul"),
             "Resets Aug 18 at 9:30pm (Asia/Seoul)"
@@ -352,7 +355,10 @@ mod window_tests {
     /// 고정 기준 시각. 시계를 읽지 않으므로 결과가 흔들리지 않는다.
     fn now() -> chrono::DateTime<Local> {
         use chrono::TimeZone;
-        Local.with_ymd_and_hms(2026, 8, 18, 21, 0, 0).single().unwrap()
+        Local
+            .with_ymd_and_hms(2026, 8, 18, 21, 0, 0)
+            .single()
+            .unwrap()
     }
 
     #[test]
@@ -369,7 +375,9 @@ mod window_tests {
         let bar = time_bar(now() + left, WEEK, now()).unwrap();
         assert_eq!(bar.label, "2 day 3 hour 15 minutes left");
         // 7일 중 2일 3시간 15분 남음 → 그만큼 지났다
-        assert!((bar.fill - (1.0 - left.num_seconds() as f64 / WEEK.num_seconds() as f64)).abs() < 1e-9);
+        assert!(
+            (bar.fill - (1.0 - left.num_seconds() as f64 / WEEK.num_seconds() as f64)).abs() < 1e-9
+        );
     }
 
     /// 이미 지난 리셋 시각이면 창이 다 찬 것으로 본다 — 음수 시간을 보여주면 안 된다.

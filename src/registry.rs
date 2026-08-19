@@ -33,8 +33,8 @@ static AGENTS: &[AgentSpec] = &[
 
 /// 기본은 로컬 캐시를 읽고, 오래됐을 때만 직접 조회한다.
 fn claude_fetch(tz: String, live: bool) -> Fetch {
-    Box::new(move || {
-        if live {
+    Box::new(move |force_live| {
+        if live || force_live {
             claude::source::fetch_live(&tz)
         } else {
             claude::source::fetch(&tz)
@@ -44,7 +44,7 @@ fn claude_fetch(tz: String, live: bool) -> Fetch {
 
 /// Codex 는 app-server 호출이 저렴해 캐시 계층이 없다 — `live` 와 무관하다.
 fn codex_fetch(tz: String, _live: bool) -> Fetch {
-    Box::new(move || codex::source::fetch(&tz))
+    Box::new(move |_force_live| codex::source::fetch(&tz))
 }
 
 pub fn all() -> &'static [AgentSpec] {
