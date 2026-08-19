@@ -8,8 +8,12 @@ use crate::render::{BOLD, DIM, MUTED, RESET, ansi_for};
 
 const GAUGE_MIN: usize = 20;
 const GAUGE_MAX: usize = 48;
-/// 게이지 우측 라벨(`100% used`)이 들어갈 여백
-const SUFFIX_ROOM: usize = 14;
+/// 게이지 우측 라벨(`100% used`)이 들어갈 자리 + 오른쪽 여백.
+/// 게이지가 터미널 경계에 붙으면 답답하다.
+const SUFFIX_ROOM: usize = 14 + RIGHT_MARGIN;
+
+/// 화면 오른쪽 여백.
+const RIGHT_MARGIN: usize = 2;
 
 pub fn render(snap: &Snapshot, color: bool, width: usize) -> String {
     let gauge_width = width

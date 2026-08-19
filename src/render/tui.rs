@@ -35,6 +35,10 @@ const GAUGE_INDENT: u16 = 3;
 /// 좌우로 놓인 구획 사이 여백.
 const PANE_GAP: u16 = 2;
 
+/// 화면 오른쪽 여백. 게이지가 터미널 경계에 붙으면 답답하고,
+/// 창 크기를 줄일 때 글자가 잘리는 것처럼 보인다.
+const RIGHT_MARGIN: u16 = 2;
+
 /// 한 항목이 차지하는 줄 수 — 제목·사용량은 항상, 나머지는 있을 때만.
 fn rows_for(m: &Meter, has_chart: bool) -> usize {
     2 + usize::from(m.time.is_some())
@@ -227,12 +231,18 @@ fn apply(app: &mut App, round: Round) {
 }
 
 fn draw(f: &mut Frame, app: &App) {
+    // 오른쪽 여백을 먼저 떼어 낸다 — 머리글·구획·꼬리글이 모두 같은 폭을 쓴다
+    let full = f.area();
+    let canvas = Rect {
+        width: full.width.saturating_sub(RIGHT_MARGIN),
+        ..full
+    };
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
-    .areas(f.area());
+    .areas(canvas);
 
     draw_header(f, header, app);
     draw_panes(f, body, app);
@@ -557,6 +567,20 @@ mod tests {
         let left = line.find("Claude Code").unwrap();
         let right = line.find("Codex").unwrap();
         assert!(left < right, "설정 순서대로 왼쪽부터 놓인다");
+    }
+
+    /// 오른쪽 끝에 여백이 있어야 한다 — 게이지가 경계에 붙으면 답답하다.
+    #[test]
+    fn leaves_a_right_margin() {
+        let app = app_with(vec![pane("claude", three())]);
+        let out = render(&app, 60, 24);
+        for (i, line) in out.lines().enumerate() {
+            let tail: String = line.chars().rev().take(RIGHT_MARGIN as usize).collect();
+            assert!(
+                tail.chars().all(char::is_whitespace),
+                "{i}번째 줄 오른쪽 끝이 채워져 있음: {line:?}"
+            );
+        }
     }
 
     /// 좁은 화면에서도 두 구획을 그린다 — 폭이 줄어들 뿐이다.
