@@ -315,6 +315,19 @@ pub fn time_bar(
     })
 }
 
+/// 창이 아직 시작되지 않았을 때의 시간 게이지.
+///
+/// 사용량이 0 이면 서버가 리셋 시각을 주지 않는다 — 창이 언제 끝날지 아직
+/// 정해지지 않았기 때문이다. 그래도 자리를 비워 두면 항목마다 줄 수가 달라져
+/// 화면이 성기게 보이므로, 빈 게이지로 채워 두 줄 구조를 유지한다.
+pub fn pending_bar() -> Bar {
+    Bar {
+        fill: 0.0,
+        label: "not started".to_string(),
+        level: Level::Normal,
+    }
+}
+
 /// `1 hour 12 minutes left` / `2 day 3 hour 15 minutes left`
 ///
 /// 단위 표기를 단수로 고정한다. 자릿수가 일정해야 여러 줄이 세로로 맞는다.
@@ -372,6 +385,14 @@ mod window_tests {
     fn reset_beyond_window_clamps_to_zero() {
         let bar = time_bar(now() + TimeDelta::hours(10), SESSION, now()).unwrap();
         assert_eq!(bar.fill, 0.0);
+    }
+
+    /// 창이 시작되지 않았어도 게이지 자리는 채운다.
+    #[test]
+    fn pending_bar_is_empty_but_present() {
+        let bar = pending_bar();
+        assert_eq!(bar.fill_clamped(), 0.0);
+        assert_eq!(bar.label, "not started");
     }
 
     #[test]

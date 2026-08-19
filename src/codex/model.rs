@@ -8,7 +8,9 @@
 use chrono::{DateTime, Local, TimeZone};
 use serde::Deserialize;
 
-use crate::meter::{Bar, Meter, Window as MeterWindow, resets_text, time_bar, window_title};
+use crate::meter::{
+    Bar, Meter, Window as MeterWindow, pending_bar, resets_text, time_bar, window_title,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +103,11 @@ pub fn to_meters(resp: &RateLimitsResponse, tz: &str) -> Vec<Meter> {
                 title: window_title(Some(mins), scope),
                 usage: Bar::used(w.used_percent, None),
                 window,
-                time: window.and_then(|w| time_bar(w.resets_at, w.len, now)),
+                time: Some(
+                    window
+                        .and_then(|w| time_bar(w.resets_at, w.len, now))
+                        .unwrap_or_else(pending_bar),
+                ),
                 footnote: at.map(|at| resets_text(at, tz)),
                 emphasized: false,
             });
@@ -190,7 +196,8 @@ mod tests {
         assert_eq!(meters[0].title, "Current week (all models)");
         assert_eq!(meters[0].usage.label, "42% used");
         assert!(meters[0].footnote.is_none(), "resetsAt 이 없으면 각주도 없다");
-        assert!(meters[0].time.is_none(), "resetsAt 이 없으면 시간 게이지도 없다");
+        // 시간 게이지는 자리를 지킨다 (창 미시작 표시)
+        assert_eq!(meters[0].time.as_ref().unwrap().label, "not started");
     }
 
     /// 주간 창만 보여준다. 짧은 창은 줄만 차지하므로 제외한다.
@@ -204,6 +211,17 @@ mod tests {
         assert_eq!(meters.len(), 1, "5시간 창은 빠져야 함: {meters:#?}");
         assert_eq!(meters[0].title, "Current week (all models)");
         assert_eq!(meters[0].usage.label, "60% used");
+    }
+
+    /// `resetsAt` 이 없어도 시간 게이지 자리는 채운다.
+    #[test]
+    fn window_without_reset_still_has_a_time_row() {
+        let body = r#"{"rateLimits":{"limitId":"codex",
+            "primary":{"usedPercent":0,"windowDurationMins":10080}}}"#;
+        let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
+        let meters = to_meters(&r, "Asia/Seoul");
+        assert_eq!(meters[0].time.as_ref().unwrap().label, "not started");
+        assert!(meters[0].footnote.is_none());
     }
 
     /// 창 길이를 모르면 표시하지 않는다 — 시간 게이지를 만들 수 없다.

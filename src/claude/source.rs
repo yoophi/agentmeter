@@ -197,6 +197,20 @@ mod tests {
         assert_eq!(snap.origin.kind, crate::meter::OriginKind::Cache);
     }
 
+    /// 사용량 0 이라 서버가 `resets_at` 을 주지 않아도 게이지 두 줄은 유지된다.
+    #[test]
+    fn limit_without_reset_still_has_a_time_row() {
+        let body = r#"{"captured_at":"2026-08-19T01:00:00.000Z","usage":{"limits":[
+            {"kind":"session","percent":0,"severity":"normal","resets_at":null,
+             "scope":null,"is_active":false}]}}"#;
+        let (_, resp) = parse_cache(body).unwrap();
+        let meters = to_meters(&resp.limits, "Asia/Seoul");
+        let time = meters[0].time.as_ref().expect("자리는 채워져야 한다");
+        assert_eq!(time.label, "not started");
+        assert_eq!(time.fill, 0.0);
+        assert!(meters[0].footnote.is_none(), "리셋 시각을 모르면 각주는 없다");
+    }
+
     /// 서버가 실제로 보내는 `severity: "warning"` 이 색 등급으로 이어지는지.
     #[test]
     fn warning_severity_is_honored() {

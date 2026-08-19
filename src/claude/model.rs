@@ -9,7 +9,8 @@ use chrono::{DateTime, Local};
 use serde::Deserialize;
 
 use crate::meter::{
-    Bar, Level, Meter, Window, level_from_used, resets_text, time_bar, window_title,
+    Bar, Level, Meter, Window, level_from_used, pending_bar, resets_text, time_bar,
+    window_title,
 };
 
 /// 세션 한도 창 길이. 응답이 창 길이를 알려주지 않아 상수로 둔다
@@ -128,7 +129,11 @@ pub fn to_meters(limits: &[Limit], tz: &str) -> Vec<Meter> {
                 title: l.title(),
                 usage: Bar::used(l.percent, Some(l.level())),
                 window,
-                time: window.and_then(|w| time_bar(w.resets_at, w.len, now)),
+                time: Some(
+                    window
+                        .and_then(|w| time_bar(w.resets_at, w.len, now))
+                        .unwrap_or_else(pending_bar),
+                ),
                 footnote: at.map(|at| resets_text(at, tz)),
                 emphasized: l.is_active,
             }
