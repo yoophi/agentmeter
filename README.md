@@ -5,6 +5,7 @@
 - **`agentmeter`** — 설정한 에이전트들을 한 화면에 나란히
 - **`ccmeter`** — Claude Code 만
 - **`codexmeter`** — Codex 만
+
 각 도구의 `/usage`·`/status` 가 보여주는 것과 같은 값 — 한도 소진율과 리셋 시각 — 을
 터미널에서 바로 확인하거나 상주시켜 둘 수 있습니다.
 
@@ -85,9 +86,11 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 ```
 
 `codexmeter` 도 옵션이 완전히 같습니다.
-상주 모드에서 `r` 은 즉시 새로고침, `q` 는 종료입니다.
+상주 모드에서 `r`은 캐시 우선 즉시 새로고침, `R`은 Claude 캐시와 백오프를
+건너뛴 HTTP 직접 조회, `q`는 종료입니다. 직접 조회가 실패하면 직전 값과 실제 오류를
+함께 표시합니다.
 
-상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 한 줄 차트로 보여줍니다.
+상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 3행 Sparkline으로 보여줍니다.
 
 ```
  › Current session  +3%p
@@ -98,8 +101,9 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 ```
 
 가로축은 창 전체(세션 5시간 / 주간 7일)라 바로 위 시간 게이지와 축이 같고,
-앱을 켜기 전 구간은 `·` 로 비어 있습니다. 제목 옆 `+3%p` 는 켠 뒤로 늘어난 양입니다.
-기록은 메모리에만 남으므로 1회 실행에는 차트가 나오지 않습니다.
+수집하지 않은 구간은 `·` placeholder로 비어 있습니다. 제목 옆 `+3%p`는 현재 창의
+첫 표본 이후 늘어난 양입니다. 실측 표본은 `~/.cache/agentmeter/history/` 아래의
+공급자·창별 JSON에 저장되며, 재실행해도 같은 5시간/7일 창의 기록을 복원합니다.
 
 출력이 터미널이 아니면(파이프, `watch` 아래) 자동으로 1회 출력으로 내려갑니다.
 전체 화면 TUI 는 alternate screen 을 쓰기 때문에 `watch` 안에서는 동작할 수 없습니다.
@@ -108,9 +112,10 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 
 ### ccmeter
 
-**로컬 캐시를 먼저 읽습니다.** Claude Code 는 `/api/oauth/usage` 응답을 통째로
-`~/.claude/token-scope-oauth-usage.json` 에 저장해 두는데, 그 파일을 읽으면
-네트워크 호출이 없어 즉시 응답하고 `HTTP 429` 도 없습니다.
+**로컬 캐시를 먼저 읽습니다.** Claude Code의
+`~/.claude/token-scope-oauth-usage.json`과 마지막 직접 조회 성공 값을 보존한
+`~/.cache/agentmeter/claude-usage.json` 중 최신 값을 사용합니다. 네트워크 호출이
+없어 즉시 응답하고 `HTTP 429`도 없습니다.
 
 캐시가 15분보다 오래됐을 때만 `GET /api/oauth/usage` 를 직접 호출합니다.
 조회에 실패하면 5분간 다시 시도하지 않고, 그동안은 캐시 값에 `갱신 실패` 를 붙여
@@ -173,38 +178,129 @@ ccmeter 가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본 경로
 
 ## 문서
 
-- [docs/architecture.md](docs/architecture.md) — 공통 구조, `Meter` 표현, 실행 모드
+- [docs/architecture.md](docs/architecture.md) — 계층 경계, 도메인·화면 모델, 실행 모드
+- [docs/architecture-review.html](docs/architecture-review.html) — 헥사고날 아키텍처 전체 리뷰
 - [docs/ccmeter.md](docs/ccmeter.md) — 캐시 우선 조회, 자격증명, 429 대응
 - [docs/codexmeter.md](docs/codexmeter.md) — app-server 프로토콜, 응답 처리
 
-## 구조
+## 아키텍처
 
-```
-src/
-  meter.rs        공통 화면 표현 (제목·게이지 두 줄·각주) + 문구·창 진행률 계산
-  app.rs          모드 분기와 실행 로직
-  cli.rs          공통 옵션
-  history.rs      한도 창별 사용률 영속 기록과 Sparkline 차트
-  config.rs       설정 파일 (표시할 에이전트)
-  registry.rs     이름 → 에이전트 표
-  multi.rs        여러 에이전트 동시 조회
-  render/         plain(stdout) · tui(ratatui) 렌더러 · JSON 출력
-  claude/         api(HTTP) · auth(Keychain) · source(캐시 우선) · model
-  codex/          client(app-server) · source · model
-  bin/            ccmeter.rs · codexmeter.rs
+헥사고날 아키텍처를 사용하며 의존성은 바깥에서 안쪽으로만 향합니다. 안쪽 module은
+CLI, HTTP, 파일시스템, 프로세스, 터미널 framework를 알지 못합니다.
+
+```mermaid
+flowchart LR
+    BIN[src/bin<br/>실행 진입점] --> IN[adapters/inbound<br/>CLI와 실행 모드]
+    IN --> APP[application<br/>사용 사례와 port]
+    APP --> DOM[domain<br/>사용량 규칙]
+    OUT[adapters/outbound<br/>Claude·Codex·TOML] -. port 구현 .-> APP
+    PRES[adapters/presentation<br/>plain·TUI·JSON] --> APP
+    PRES --> DOM
+    BOOT[bootstrap<br/>composition root] --> APP
+    BOOT --> OUT
+    IN --> PRES
 ```
 
-각 도구는 자기 응답을 `Meter` 로 옮기기만 하고, 게이지·TUI·CLI 는 전부 공유합니다.
-새 에이전트를 추가하려면 `src/<이름>/` 에 클라이언트와 `to_meters()`,
-그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 만든 뒤
-`registry.rs` 에 한 줄 등록하면 됩니다. 그러면 설정 파일과 `agentmeter` 가
-바로 알아봅니다. 전용 바이너리를 따로 두고 싶으면 `src/bin/` 에 진입점을 추가합니다.
-자세한 것은 [docs/architecture.md](docs/architecture.md) 를 보세요.
+| 위치 | 책임 | 알면 안 되는 것 |
+|---|---|---|
+| `src/domain/` | `UsageLimit`, `UsageSnapshot`, `Origin`, 시간 창과 순수 규칙 | provider 응답 타입, I/O, CLI, 화면 문구·색상 |
+| `src/application/` | 공급자 검증·병렬 조회, 설정, watch 상태, outbound port | Clap, ratatui, HTTP·파일 구현 |
+| `src/adapters/inbound/` | CLI 문법, 실행 모드, application 호출 | provider 내부 구현, 인증·캐시 세부사항 |
+| `src/adapters/outbound/` | 외부 응답 파싱, domain 정규화, 설정·히스토리 port 구현 | `Meter`, 게이지·각주 같은 화면 표현 |
+| `src/adapters/presentation/` | domain snapshot을 `Meter`로 투영하고 plain·TUI·JSON 출력 | 네트워크, 인증, 설정 파일 저장 |
+| `src/bootstrap.rs` | 구체 adapter를 port에 연결 | 비즈니스 규칙과 출력 formatting |
+| `src/bin/` | 공개 실행 함수 호출 | application 조립과 실행 workflow |
+
+주요 데이터 흐름은 다음과 같습니다.
+
+```mermaid
+flowchart LR
+    EXT[외부 provider 응답] --> N[outbound 정규화]
+    N --> SNAP[UsageSnapshot]
+    SNAP --> USE[application 사용 사례]
+    USE --> PROJECT[presentation projection]
+    PROJECT --> METER[Meter 화면 모델]
+    METER --> OUTPUT[plain · TUI · JSON]
+```
+
+라이브러리의 지원 interface는 `run_agentmeter`, `run_ccmeter`, `run_codexmeter` 세 함수입니다.
+domain, port, adapter, composition root는 crate-private로 유지합니다. 자세한 설계와 근거는
+[docs/architecture.md](docs/architecture.md)와
+[아키텍처 리뷰](docs/architecture-review.html)를 보세요.
+
+## 개발 준수 사항
+
+새 기능과 리팩터링은 아래 규칙을 따라야 합니다.
+
+### 의존성과 책임
+
+- domain에는 provider 이름, JSON field, 시간대 문자열, 색상, 렌더링 문구, I/O를 넣지 않습니다.
+- application은 사용 사례의 순서와 정책을 소유합니다. caller가 `find → select → fetch` 같은
+  호출 순서를 조립하게 만들지 않습니다.
+- inbound adapter는 사용자 입력을 application의 의도로 변환합니다. `--live` 같은 CLI 문법을
+  domain이나 outbound port에 그대로 전달하지 않습니다.
+- outbound adapter는 외부 값을 `UsageSnapshot`으로 정규화합니다. `Meter`, 제목, 각주,
+  ANSI 색상 같은 presentation 값을 만들지 않습니다.
+- presentation adapter는 조회·인증·파일 저장을 수행하지 않습니다. 같은 문구와 화면 모델은
+  `adapters/presentation/model.rs`의 projection을 공유합니다.
+- 구체 adapter 생성과 연결은 `bootstrap.rs`에서만 합니다. application 내부에서 production
+  adapter를 직접 생성하지 않습니다.
+- `src/bin/*`은 대응하는 공개 실행 함수만 호출하는 얇은 진입점으로 유지합니다.
+
+### Interface와 seam
+
+- `UsageSource`, `SettingsRepository`, `HistoryRepository`가 외부 기술을 교체하는 outbound port입니다.
+- port에는 application이 필요한 의미만 노출합니다. concrete client, repository, 실행 capability를
+  결과 타입에 싣지 않습니다.
+- module의 interface는 작게 유지하고 검증·선택·동시성·fallback 같은 복잡성은 implementation
+  안에 숨깁니다.
+- 테스트를 위해 만든 filesystem·clock·HTTP seam은 implementation 내부에 둡니다. production
+  caller가 알 필요가 있는 interface로 승격하지 않습니다.
+- 한 adapter만 존재하고 교체 가능성이 검증되지 않은 추상화는 추가하지 않습니다.
+
+### 도메인과 표현
+
+- 한도 이력은 화면 제목이 아니라 안정적인 `LimitId`로 식별합니다.
+- 사용률은 domain에서 `0..=100` 범위로 정규화하고, 게이지의 `0.0..=1.0` 변환은 presentation이
+  담당합니다.
+- 시간대, 현재 시각에 따른 문구, `N% used`, `Resets …`, `not started`는 presentation 관심사입니다.
+- plain, TUI, JSON 출력은 동일한 domain snapshot과 projection을 사용해야 합니다.
+
+### 테스트와 품질 게이트
+
+- 정책 테스트는 caller와 같은 interface를 통과해 observable result를 검증합니다.
+- 외부 dependency는 주입하고 테스트 adapter로 교체합니다. 테스트가 실제 HOME, Keychain,
+  네트워크, 사용자 설정 파일을 변경해서는 안 됩니다.
+- 동작을 변경할 때는 성공뿐 아니라 부분 실패, stale fallback, 알 수 없는 provider 값,
+  순서 보존을 함께 검증합니다.
+- PR을 올리기 전에 다음 명령이 모두 통과해야 합니다.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+### 새 provider 추가 체크리스트
+
+1. `src/adapters/outbound/<provider>/`에서 외부 응답 타입과 client를 구현합니다.
+2. 응답을 표현 값이 없는 `UsageLimit` 목록으로 정규화합니다.
+3. `UsageSource` port를 구현해 `UsageSnapshot`을 반환합니다.
+4. `bootstrap.rs`에서 `RegisteredAgent`로 등록합니다.
+5. provider adapter 테스트와 `UsageSource` interface-level 테스트를 추가합니다.
+6. 전용 실행 파일이 필요할 때만 `src/bin/`과 공개 실행 함수를 추가합니다.
+
+현재 알려진 예외와 후속 deepening 작업은 GitHub 이슈로 추적합니다:
+[#2](https://github.com/yoophi/agentmeter/issues/2),
+[#3](https://github.com/yoophi/agentmeter/issues/3),
+[#4](https://github.com/yoophi/agentmeter/issues/4),
+[#5](https://github.com/yoophi/agentmeter/issues/5),
+[#6](https://github.com/yoophi/agentmeter/issues/6).
 
 ## 설치
 
 ```bash
-cargo install --path .   # ccmeter, codexmeter 두 개가 함께 설치됩니다
+cargo install --path .   # agentmeter, ccmeter, codexmeter가 함께 설치됩니다
 ```
 
 ## 빌드

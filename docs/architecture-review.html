@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Architecture review — agentmeter</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: "neutral",
+        securityLevel: "loose",
+        flowchart: { curve: "basis", htmlLabels: true }
+      });
+    </script>
+    <style>
+      :root { color-scheme: light; }
+      body { background: #f7f5f0; }
+      .paper { box-shadow: 0 18px 50px rgba(15, 23, 42, .08); }
+      .seam { border-style: dashed; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: white; }
+      .leak { color: #b91c1c; border-color: #ef4444; background: #fef2f2; }
+      .diagram { min-height: 270px; }
+      .thin-band { border-left: 4px solid #cbd5e1; background: #f8fafc; }
+      .deep-band { border-left: 8px solid #4f46e5; background: #eef2ff; }
+      .mass-interface { background: #fee2e2; border: 1px solid #fca5a5; }
+      .mass-implementation { background: #e2e8f0; border: 1px solid #cbd5e1; }
+      .mass-deep { background: #172033; color: white; border: 1px solid #0f172a; }
+      code { word-break: break-word; }
+      .mermaid svg { max-width: 100% !important; }
+    </style>
+  </head>
+  <body class="text-slate-900 font-sans antialiased">
+    <main class="max-w-6xl mx-auto px-5 py-12 space-y-12">
+      <header class="paper rounded-2xl border border-stone-200 bg-white p-8">
+        <div class="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-950">
+          <strong>핵심 리팩터링 반영:</strong> 이 문서는 리팩터링 전 상태를 기준으로 도출한 리뷰입니다.
+          현재 의존성 구조는 <a class="font-semibold underline" href="architecture.md">architecture.md</a>에,
+          남은 deepening 작업은
+          <a class="font-semibold underline" href="https://github.com/yoophi/agentmeter/issues/6">#6</a>,
+          <a class="font-semibold underline" href="https://github.com/yoophi/agentmeter/issues/5">#5</a>,
+          <a class="font-semibold underline" href="https://github.com/yoophi/agentmeter/issues/4">#4</a>,
+          <a class="font-semibold underline" href="https://github.com/yoophi/agentmeter/issues/3">#3</a>,
+          <a class="font-semibold underline" href="https://github.com/yoophi/agentmeter/issues/2">#2</a>에서 추적합니다.
+        </div>
+        <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-indigo-600">Hexagonal architecture review</p>
+            <h1 class="mt-2 text-4xl font-serif font-semibold tracking-tight">agentmeter</h1>
+            <p class="mt-2 text-sm text-slate-500">2026-08-19 · current working tree · 전체 코드</p>
+          </div>
+          <div class="grid grid-cols-3 gap-3 text-center">
+            <div class="rounded-xl bg-emerald-50 px-4 py-3">
+              <div class="text-2xl font-semibold text-emerald-700">✓</div>
+              <div class="text-xs text-emerald-800">core 의존 방향</div>
+            </div>
+            <div class="rounded-xl bg-indigo-50 px-4 py-3">
+              <div class="text-2xl font-semibold text-indigo-700">6</div>
+              <div class="text-xs text-indigo-800">deepening 후보</div>
+            </div>
+            <div class="rounded-xl bg-stone-100 px-4 py-3">
+              <div class="text-2xl font-semibold text-slate-700">0</div>
+              <div class="text-xs text-slate-600">ADR / glossary</div>
+            </div>
+          </div>
+        </div>
+        <div class="mt-7 flex flex-wrap gap-4 border-t border-stone-100 pt-5 text-xs text-slate-600">
+          <span class="inline-flex items-center gap-2"><i class="h-3 w-5 rounded border border-slate-400 bg-white"></i>module</span>
+          <span class="inline-flex items-center gap-2"><i class="h-3 w-5 rounded border-2 border-dashed border-indigo-400 bg-white"></i>seam</span>
+          <span class="inline-flex items-center gap-2"><i class="h-3 w-5 rounded bg-slate-900"></i>deep module</span>
+          <span class="inline-flex items-center gap-2"><i class="h-0.5 w-5 bg-red-500"></i>leakage</span>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-10">
+        <article id="candidate-1" class="paper rounded-2xl border border-stone-200 bg-white p-7">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Candidate 01</p>
+              <h2 class="mt-1 text-2xl font-serif font-semibold">Meter를 presentation module로 되돌리기</h2>
+            </div>
+            <div class="flex gap-2">
+              <span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong</span>
+              <span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">in-process</span>
+            </div>
+          </div>
+          <div class="mt-4 rounded-lg bg-stone-50 px-4 py-3 font-mono text-xs leading-6 text-slate-600">
+            src/domain/meter.rs:1-117, 162-235, 289-340 · src/domain/history.rs:25-105<br />
+            src/adapters/outbound/claude/model.rs:112-138 · src/adapters/outbound/codex/model.rs:76-116 · src/adapters/presentation/*
+          </div>
+          <div class="mt-6 grid gap-5 lg:grid-cols-2">
+            <div>
+              <p class="mb-2 text-xs font-bold uppercase tracking-wider text-red-600">Before</p>
+              <div class="diagram rounded-xl border border-red-100 bg-red-50/40 p-3">
+                <pre class="mermaid">
+flowchart TB
+  C[Claude response] --> CM[Claude model]
+  X[Codex response] --> XM[Codex model]
+  CM --> M[domain::Meter<br/>title · label · footnote · Level]
+  XM --> M
+  M --> H[History keyed by title]
+  M --> P[plain]
+  M --> T[TUI]
+  M --> J[JSON]
+  classDef leak fill:#fef2f2,stroke:#dc2626,stroke-width:2px;
+  class M,H leak;
+                </pre>
+              </div>
+            </div>
+            <div>
+              <p class="mb-2 text-xs font-bold uppercase tracking-wider text-indigo-600">After</p>
+              <div class="diagram rounded-xl border border-indigo-100 bg-indigo-50/30 p-3">
+                <pre class="mermaid">
+flowchart TB
+  C[Claude adapter] --> U[Meaning-centered usage snapshot]
+  X[Codex adapter] --> U
+  U --> H[History by stable identity]
+  U --> PR[Deep presentation projection]
+  PR --> P[plain]
+  PR --> T[TUI]
+  PR --> J[JSON]
+  classDef deep fill:#172033,color:#fff,stroke:#0f172a,stroke-width:3px;
+  class U,PR deep;
+                </pre>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 grid gap-5 md:grid-cols-[1fr_1fr_auto]">
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Problem</h3><p class="mt-1 text-sm">domain seam 안에 제목·각주·게이지 라벨·색·빈 행 정책이 들어가 presentation 지식이 누수된다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Solution</h3><p class="mt-1 text-sm">공급자 adapter는 사용량 사실만 만들고, 기존 formatting 깊이는 presentation implementation 뒤로 옮긴다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Wins</h3><ul class="mt-1 space-y-1 text-xs text-slate-600"><li>locality: 문구 한 module</li><li>stable domain identity</li><li>tests hit domain facts</li><li>provider knowledge shrinks</li></ul></div>
+          </div>
+        </article>
+
+        <article id="candidate-2" class="paper rounded-2xl border border-stone-200 bg-white p-7">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Candidate 02</p><h2 class="mt-1 text-2xl font-serif font-semibold">에이전트 선택·조회를 하나의 deep module로</h2></div>
+            <div class="flex gap-2"><span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong</span><span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">mock + in-process</span></div>
+          </div>
+          <div class="mt-4 rounded-lg bg-stone-50 px-4 py-3 font-mono text-xs leading-6 text-slate-600">
+            src/application/usage.rs:13-133 · src/application/ports.rs:7-17 · src/adapters/inbound/runner.rs:30-108<br />
+            src/adapters/presentation/plain.rs:198-220 · src/adapters/presentation/tui.rs:112-179, 488-516
+          </div>
+          <div class="mt-6 grid gap-5 lg:grid-cols-2">
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-red-600">Before</p><div class="diagram rounded-xl border border-red-100 bg-red-50/40 p-3"><pre class="mermaid">
+flowchart TB
+  R[runner / TUI] --> F[find · names · select]
+  R --> A[Vec&lt;Agent&gt;]
+  A --> S[Arc&lt;dyn UsageSource&gt;]
+  R --> Q[fetch_all]
+  Q --> O[AgentResult containing Agent]
+  O -. capability leak .-> P[presentation tests need NeverFetch]
+  classDef leak fill:#fef2f2,stroke:#dc2626,stroke-width:2px;
+  class A,O,P leak;
+            </pre></div></div>
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-indigo-600">After</p><div class="diagram rounded-xl border border-indigo-100 bg-indigo-50/30 p-3"><pre class="mermaid">
+flowchart TB
+  R[caller intent] --> U[Deep usage query module]
+  U --> C[selection · validation · concurrency]
+  U --> S1[Claude adapter]
+  U --> S2[Codex adapter]
+  U --> O[inert identity + result]
+  O --> P[presentation]
+  classDef deep fill:#172033,color:#fff,stroke:#0f172a,stroke-width:3px;
+  class U deep;
+            </pre></div></div>
+          </div>
+          <div class="mt-6 grid gap-5 md:grid-cols-[1fr_1fr_auto]">
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Problem</h3><p class="mt-1 text-sm">application interface가 source capability, 화면 이름, binary 이름과 호출 순서 제약을 caller에게 노출한다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Solution</h3><p class="mt-1 text-sm">source와 등록 정보는 implementation 안에 두고 선택·검증·병렬 조회를 한 interface 뒤로 모은다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Wins</h3><ul class="mt-1 space-y-1 text-xs text-slate-600"><li>interface surface shrinks</li><li>no execution capability leak</li><li>tests need no fake source</li><li>leverage across all modes</li></ul></div>
+          </div>
+          <div class="mt-4 rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3 text-xs text-indigo-900">UsageSource seam 자체는 진짜다: Claude, Codex, test adapter가 실제로 교체된다. 후보는 seam 제거가 아니라 interface deepening이다.</div>
+        </article>
+
+        <article id="candidate-3" class="paper rounded-2xl border border-stone-200 bg-white p-7">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Candidate 03</p><h2 class="mt-1 text-2xl font-serif font-semibold">설정과 에이전트 선택 workflow 깊게 만들기</h2></div>
+            <div class="flex gap-2"><span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong</span><span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">local-substitutable</span></div>
+          </div>
+          <div class="mt-4 rounded-lg bg-stone-50 px-4 py-3 font-mono text-xs leading-6 text-slate-600">
+            src/bin/agentmeter.rs:69-120 · src/application/settings.rs:13-62 · src/application/usage.rs:103-106<br />
+            src/adapters/outbound/config.rs:14-83 · src/bootstrap.rs:8-38
+          </div>
+          <div class="mt-6 grid gap-5 lg:grid-cols-2">
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-red-600">Before</p><div class="diagram rounded-xl border border-red-100 bg-red-50/40 p-3"><pre class="mermaid">
+flowchart TB
+  CLI[agentmeter binary] --> CP[outbound config parser]
+  CLI --> SS[settings module]
+  CLI --> SEL[UsageApplication.select]
+  CLI --> PATH[FileSettingsRepository.path]
+  SS --> FILE[concrete file adapter]
+  SEL -. ordering constraint .-> SS
+  classDef leak fill:#fef2f2,stroke:#dc2626,stroke-width:2px;
+  class CLI,CP,PATH leak;
+            </pre></div></div>
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-indigo-600">After</p><div class="diagram rounded-xl border border-indigo-100 bg-indigo-50/30 p-3"><pre class="mermaid">
+flowchart TB
+  CLI[CLI syntax adapter] --> CFG[Deep settings selection module]
+  CFG --> V[default · validate · select · persist]
+  CFG --> PORT[SettingsRepository seam]
+  PORT --> FILE[TOML adapter]
+  CFG --> OUT[validated selection result]
+  classDef deep fill:#172033,color:#fff,stroke:#0f172a,stroke-width:3px;
+  class CFG deep;
+            </pre></div></div>
+          </div>
+          <div class="mt-6 grid gap-5 md:grid-cols-[1fr_1fr_auto]">
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Problem</h3><p class="mt-1 text-sm">CLI 구문·TOML 위치·기본값·검증·선택 순서가 네 module에 흩어져 locality가 낮다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Solution</h3><p class="mt-1 text-sm">CLI 문자열 해석과 파일 encoding은 각 adapter에 두고, 검증된 선택 결과까지 application module이 책임진다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Wins</h3><ul class="mt-1 space-y-1 text-xs text-slate-600"><li>ordering constraint disappears</li><li>locality: one workflow</li><li>memory adapter tests behavior</li><li>file tests only encoding</li></ul></div>
+          </div>
+        </article>
+
+        <article id="candidate-4" class="paper rounded-2xl border border-stone-200 bg-white p-7">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Candidate 04</p><h2 class="mt-1 text-2xl font-serif font-semibold">Claude acquisition policy를 interface로 테스트</h2></div>
+            <div class="flex gap-2"><span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">Worth exploring</span><span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">local-substitutable + mock</span></div>
+          </div>
+          <div class="mt-4 rounded-lg bg-stone-50 px-4 py-3 font-mono text-xs leading-6 text-slate-600">
+            src/adapters/outbound/claude/source.rs:63-158, 172-267 · src/adapters/outbound/claude/api.rs:17-63
+          </div>
+          <div class="mt-6 grid gap-5 lg:grid-cols-2">
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-red-600">Before</p><div class="diagram rounded-xl border border-red-100 bg-red-50/40 p-4">
+              <div class="space-y-2 text-sm">
+                <div class="rounded-lg thin-band p-3">ClaudeUsageSource interface</div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="rounded-lg border border-red-200 bg-red-50 p-3 text-red-800">HOME + filesystem</div>
+                  <div class="rounded-lg border border-red-200 bg-red-50 p-3 text-red-800">wall clock</div>
+                  <div class="rounded-lg border border-red-200 bg-red-50 p-3 text-red-800">static HTTP call</div>
+                  <div class="rounded-lg border border-red-200 bg-red-50 p-3 text-red-800">failure marker</div>
+                </div>
+                <div class="rounded-lg border border-dashed border-slate-300 p-3 text-xs text-slate-500">tests stop at parse / is_stale / mapping</div>
+              </div>
+            </div></div>
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-indigo-600">After</p><div class="diagram rounded-xl border border-indigo-100 bg-indigo-50/30 p-4">
+              <div class="deep rounded-xl p-5">
+                <p class="text-xs font-bold uppercase tracking-wider text-indigo-200">Deep Claude acquisition module</p>
+                <p class="mt-2 text-lg font-semibold">fresh cache · stale fallback · backoff · live fetch</p>
+                <div class="mt-5 grid grid-cols-3 gap-2 text-center text-xs text-slate-900">
+                  <div class="rounded bg-white p-2">local stand-in</div><div class="rounded bg-white p-2">clock control</div><div class="rounded bg-white p-2">HTTP mock adapter</div>
+                </div>
+              </div>
+              <div class="mt-3 rounded-lg border border-dashed border-indigo-300 p-3 text-xs text-indigo-800">tests cross the same external interface</div>
+            </div></div>
+          </div>
+          <div class="mt-6 grid gap-5 md:grid-cols-[1fr_1fr_auto]">
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Problem</h3><p class="mt-1 text-sm">가장 복잡한 fresh/stale/fallback 조합은 전역 환경·시계·파일·HTTP 때문에 현재 interface로 테스트되지 않는다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Solution</h3><p class="mt-1 text-sm">외부 seam은 유지하고, implementation 내부 seam에서 filesystem·clock·HTTP adapter를 교체해 정책 전체를 검증한다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Wins</h3><ul class="mt-1 space-y-1 text-xs text-slate-600"><li>interface is test surface</li><li>fallback bugs gain locality</li><li>no real HOME mutation</li><li>policy depth preserved</li></ul></div>
+          </div>
+        </article>
+
+        <article id="candidate-5" class="paper rounded-2xl border border-stone-200 bg-white p-7">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Candidate 05</p><h2 class="mt-1 text-2xl font-serif font-semibold">상주 갱신 상태를 TUI에서 분리</h2></div>
+            <div class="flex gap-2"><span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">Worth exploring</span><span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">in-process</span></div>
+          </div>
+          <div class="mt-4 rounded-lg bg-stone-50 px-4 py-3 font-mono text-xs leading-6 text-slate-600">
+            src/adapters/presentation/tui.rs:52-242, 252-458, 496-701 · src/domain/history.rs:25-105
+          </div>
+          <div class="mt-6 grid gap-5 lg:grid-cols-2">
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-red-600">Before</p><div class="diagram rounded-xl border border-red-100 bg-red-50/40 p-4 space-y-2">
+              <div class="rounded-lg thin-band p-3 text-xs uppercase tracking-wider">terminal event loop</div>
+              <div class="rounded-lg thin-band p-3 text-xs uppercase tracking-wider">worker thread + schedule</div>
+              <div class="rounded-lg thin-band p-3 text-xs uppercase tracking-wider">query orchestration</div>
+              <div class="rounded-lg thin-band p-3 text-xs uppercase tracking-wider">stale result retention</div>
+              <div class="rounded-lg thin-band p-3 text-xs uppercase tracking-wider">history + delta text</div>
+              <div class="rounded-lg thin-band p-3 text-xs uppercase tracking-wider">ratatui drawing</div>
+              <p class="pt-1 text-center text-xs text-red-700">tests bypass run and assemble private state</p>
+            </div></div>
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-indigo-600">After</p><div class="diagram rounded-xl border border-indigo-100 bg-indigo-50/30 p-4">
+              <div class="deep rounded-xl p-5">
+                <p class="text-xs font-bold uppercase tracking-wider text-indigo-200">Deep watch-state module</p>
+                <p class="mt-2 text-lg font-semibold">refresh outcome · stale retention · samples · next refresh</p>
+                <div class="mt-4 rounded border border-dashed border-slate-500 px-3 py-2 text-xs text-slate-300">one observable state interface</div>
+              </div>
+              <div class="my-3 text-center text-indigo-400">↓</div>
+              <div class="rounded-lg deep-band p-4 text-sm">thin terminal adapter: keys + layout + draw</div>
+            </div></div>
+          </div>
+          <div class="mt-6 grid gap-5 md:grid-cols-[1fr_1fr_auto]">
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Problem</h3><p class="mt-1 text-sm">TUI implementation에 terminal I/O와 갱신 상태 규칙이 결합되고, 테스트는 공개 run interface를 통과하지 않는다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Solution</h3><p class="mt-1 text-sm">상태 전이와 실패 보존·이력 규칙을 in-process deep module로 옮기고 TUI adapter는 입력과 그리기만 맡는다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Wins</h3><ul class="mt-1 space-y-1 text-xs text-slate-600"><li>tests hit one interface</li><li>state bugs gain locality</li><li>terminal adapter shrinks</li><li>future UI gains leverage</li></ul></div>
+          </div>
+          <div class="mt-4 rounded-lg border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-900">tui.rs가 길다는 사실은 문제가 아니다. run 하나 뒤에 많은 implementation을 숨겨 이미 depth가 있다. 후보는 상태 규칙의 seam만 바로잡는다.</div>
+        </article>
+
+        <article id="candidate-6" class="paper rounded-2xl border border-stone-200 bg-white p-7">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Candidate 06</p><h2 class="mt-1 text-2xl font-serif font-semibold">crate 공개 surface를 실제 seam까지 축소</h2></div>
+            <div class="flex gap-2"><span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">Worth exploring</span><span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">in-process</span></div>
+          </div>
+          <div class="mt-4 rounded-lg bg-stone-50 px-4 py-3 font-mono text-xs leading-6 text-slate-600">
+            src/lib.rs:3-12 · src/adapters/mod.rs:3-5 · src/adapters/outbound/mod.rs:3-5<br />
+            src/adapters/outbound/claude/mod.rs:3-6 · src/adapters/outbound/codex/mod.rs:3-5 · src/application/mod.rs:8-11
+          </div>
+          <div class="mt-6 grid gap-5 lg:grid-cols-2">
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-red-600">Before</p><div class="diagram rounded-xl border border-red-100 bg-red-50/40 p-5">
+              <div class="mass-interface rounded-xl p-5 text-center">
+                <p class="text-xs font-bold uppercase tracking-wider text-red-700">Wide public interface</p>
+                <div class="mt-4 grid grid-cols-3 gap-2 text-xs"><span class="rounded bg-white p-2">adapters</span><span class="rounded bg-white p-2">bootstrap</span><span class="rounded bg-white p-2">domain</span><span class="rounded bg-white p-2">raw models</span><span class="rounded bg-white p-2">transport client</span><span class="rounded bg-white p-2">legacy aliases</span></div>
+              </div>
+              <div class="mass-implementation mt-3 rounded-xl p-10 text-center text-sm text-slate-600">implementation is nearly as visible</div>
+            </div></div>
+            <div><p class="mb-2 text-xs font-bold uppercase tracking-wider text-indigo-600">After</p><div class="diagram rounded-xl border border-indigo-100 bg-indigo-50/30 p-5">
+              <div class="mx-auto w-2/3 rounded-lg border border-indigo-300 bg-white p-3 text-center text-xs font-bold uppercase tracking-wider text-indigo-700">Small supported interface</div>
+              <div class="mass-deep mt-3 rounded-2xl p-12 text-center">
+                <p class="text-xs font-bold uppercase tracking-wider text-indigo-200">Deep crate implementation</p>
+                <p class="mt-3 text-sm">adapter internals · transport types · composition details</p>
+              </div>
+            </div></div>
+          </div>
+          <div class="mt-6 grid gap-5 md:grid-cols-[1fr_1fr_auto]">
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Problem</h3><p class="mt-1 text-sm">모든 adapter 내부와 compatibility alias가 공개되어 지원 interface와 implementation 구분이 사라진다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Solution</h3><p class="mt-1 text-sm">지원할 domain 결과와 application 진입만 공개하고 transport·조립 세부는 crate-private로 닫는다.</p></div>
+            <div><h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Wins</h3><ul class="mt-1 space-y-1 text-xs text-slate-600"><li>interface matches seam</li><li>AI navigation gains signal</li><li>internal change gains locality</li><li>deletion removes aliases</li></ul></div>
+          </div>
+          <div class="mt-4 rounded-lg border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-900">기존 외부 Rust caller가 있다면 compatibility 비용을 먼저 확인해야 한다.</div>
+        </article>
+      </section>
+
+      <section id="top-recommendation" class="paper rounded-2xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-950 to-slate-900 p-8 text-white">
+        <p class="text-xs font-bold uppercase tracking-[0.2em] text-indigo-300">Top recommendation</p>
+        <a href="#candidate-1" class="mt-2 block text-3xl font-serif font-semibold underline decoration-indigo-400 decoration-2 underline-offset-8">Meter를 presentation module로 되돌리기</a>
+        <p class="mt-5 max-w-3xl text-sm leading-6 text-slate-300">가장 자주 바뀐 meter·renderer·provider model 경로를 동시에 단순화하고, 후보 2의 application interface와 후보 5의 watch-state seam도 자연스럽게 작게 만든다.</p>
+      </section>
+    </main>
+  </body>
+</html>

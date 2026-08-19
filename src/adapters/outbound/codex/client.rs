@@ -17,7 +17,7 @@ use anyhow::{Context, anyhow};
 use serde_json::Value;
 
 use super::model::RateLimitsResponse;
-use crate::FetchError;
+use crate::application::FetchError;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_ID: i64 = 2;

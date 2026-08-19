@@ -1,246 +1,177 @@
-# 구조
+# 아키텍처
 
-`agentmeter` 는 두 개의 바이너리(`ccmeter`, `codexmeter`)를 담은 하나의 패키지입니다.
-서로 다른 에이전트를 보지만 화면에 그리는 방식은 완전히 같아야 하므로,
-**데이터를 가져오는 부분만 도구별로 두고 나머지는 전부 공유**합니다.
+`agentmeter`는 `agentmeter`, `ccmeter`, `codexmeter` 세 실행 파일을 제공하며,
+핵심 정책이 HTTP·프로세스·파일시스템·터미널 기술에 의존하지 않도록 헥사고날
+아키텍처로 구성합니다.
 
-```
-src/
-  meter.rs        공통 화면 표현 + 문구 생성 + 창 진행률 계산
-  history.rs      한도 창별 사용률 영속 기록 + Sparkline 차트
-  config.rs       설정 파일 읽기·쓰기
-  registry.rs     이름 → 에이전트 표 (설정과 agentmeter 가 이것만 본다)
-  multi.rs        여러 에이전트 동시 조회
-  app.rs          실행 모드 분기
-  cli.rs          공통 옵션
-  render/
-    mod.rs        색·JSON 출력
-    plain.rs      stdout 렌더러
-    tui.rs        ratatui 렌더러 + 이벤트 루프
-  claude/         ccmeter 전용
-    api.rs        /api/oauth/usage HTTP 클라이언트
-    auth.rs       Keychain 자격증명 (읽기 전용)
-    source.rs     캐시 우선 조회 + 실패 백오프
-    model.rs      응답 → Meter
-  codex/          codexmeter 전용
-    client.rs     app-server JSONL 클라이언트
-    source.rs     조회 진입점 (캐시 없음)
-    model.rs      응답 → Meter
-  bin/
-    agentmeter.rs 통합 진입점 + config 명령
-    ccmeter.rs    진입점
-    codexmeter.rs 진입점
+## 의존성 방향
+
+```mermaid
+flowchart LR
+    BIN[bin<br/>얇은 실행 진입점] --> IN[inbound<br/>CLI와 실행 모드]
+    IN --> APP[application<br/>조회·설정·watch 상태]
+    APP --> DOM[domain<br/>사용량과 시간 창]
+    OUT[outbound<br/>Claude·Codex·TOML] -. 포트 구현 .-> APP
+    PRES[presentation<br/>plain·TUI·JSON] --> APP
+    PRES --> DOM
+    BOOT[bootstrap<br/>composition root] --> APP
+    BOOT --> OUT
+    IN --> PRES
 ```
 
-## 공통 표현: `Meter`
+안쪽 계층은 바깥 계층을 모릅니다.
 
-각 에이전트의 응답은 서로 다르지만, 화면에 그릴 때 필요한 것은 같습니다.
-그래서 응답을 곧바로 `Meter` 목록으로 옮기고, 그 뒤로는 출처를 구분하지 않습니다.
+- `src/domain/` — `UsageLimit`, `UsageSnapshot`, `Origin`, `UsageWindow` 같은 순수 도메인 값
+- `src/application/` — 공급자 선택·병렬 조회, 설정, watch 상태와 아웃바운드 포트
+- `src/adapters/inbound/` — CLI 문법과 1회·JSON·상주 실행 모드
+- `src/adapters/outbound/claude/` — Claude 캐시, 자격증명, HTTP 어댑터
+- `src/adapters/outbound/codex/` — Codex app-server JSONL 어댑터
+- `src/adapters/outbound/config.rs` — TOML 설정 저장소
+- `src/adapters/outbound/history.rs` — 한도 창별 JSON 히스토리 저장소
+- `src/adapters/presentation/` — 화면 모델 투영, plain·TUI·JSON 출력
+- `src/bootstrap.rs` — 구체 어댑터를 포트에 연결하는 유일한 composition root
+- `src/bin/` — 공개 실행 함수 하나만 호출하는 얇은 프로세스 진입점
 
-```rust
-pub struct Bar {
-    pub fill: f64,      // 채움 비율 0.0 ~ 1.0
-    pub label: String,  // "50% used" / "1 hour 12 minutes left"
-    pub level: Level,   // 색 (Normal / Warning / Critical)
-}
+라이브러리 공개 표면은 `run_agentmeter`, `run_ccmeter`, `run_codexmeter` 세 함수로
+제한합니다. 내부 포트와 어댑터를 외부 API로 노출하지 않아 계층 구조를 구현 세부사항으로
+유지합니다.
 
-pub struct Meter {
-    pub title: String,            // "Current week (all models)"
-    pub usage: Bar,               // 한도를 얼마나 썼는지
-    pub time: Option<Bar>,        // 창의 시간이 얼마나 흘렀는지
-    pub footnote: Option<String>, // "Resets Aug 20 at 12:31pm (Asia/Seoul)"
-    pub emphasized: bool,         // 지금 적용 중인 한도 → `›` 마커
-}
+## 도메인과 화면 모델 분리
+
+공급자는 렌더링 문자열이나 색상을 만들지 않습니다. 각 공급자의 응답을 공통 도메인으로
+정규화한 뒤 presentation 어댑터가 한 번만 화면 모델로 투영합니다.
+
+```mermaid
+flowchart LR
+    CA[Claude limits] --> CN[Claude 정규화]
+    CO[Codex rate limits] --> DN[Codex 정규화]
+    CN --> US[UsageSnapshot<br/>UsageLimit 목록 + Origin]
+    DN --> US
+    US --> PJ[presentation::model::project]
+    PJ --> VM[Meter<br/>제목·게이지·각주·색상]
+    VM --> PL[Plain]
+    VM --> TU[TUI]
+    VM --> JS[JSON]
 ```
 
-`fill` 과 `label` 을 나눠 둔 이유가 있습니다.
-Codex 의 `/status` 는 남은 비율(`71% left`)로 표시하고 Claude 의 `/usage` 는
-소진율(`51% used`)로 표시하는데, 퍼센트 하나로 합쳐 두면 어느 쪽 기준인지
-호출부마다 헷갈립니다. 채움 비율과 표시 문구를 분리하면 각 도구가 자기 방식대로
-채워 넣을 수 있고, 렌더러는 해석 없이 그리기만 하면 됩니다.
+`UsageLimit`은 다음 의미만 보관합니다.
 
-> 현재는 두 도구 모두 **소진율(`N% used`)** 로 통일해 두었습니다.
-> Codex 원본은 남은 비율이므로 `100 - usedPercent` 가 아니라 `usedPercent` 를 그대로 씁니다.
+- 공급자가 부여한 안정적인 `LimitId`
+- 선택적인 모델 범위(scope)
+- 소진율과 심각도
+- 현재 적용 중인지 여부
+- 창 길이와 리셋 시각
 
-### 두 번째 게이지: 창 진행률
+`Current week`, `N% used`, `Resets …`, `not started` 같은 문구와 색상은
+`adapters/presentation/model.rs`에서 만듭니다. 시간대도 표현 관심사이므로 조회 포트에
+전달하지 않습니다. 모든 투영 함수는 현재 시각을 인자로 받아 테스트가 결정론적입니다.
 
-`time` 은 한도 창(window)의 시간이 얼마나 흘렀는지를 보여줍니다.
-사용률과 나란히 놓으면 페이스가 읽힙니다:
+## 애플리케이션 경계
 
+### 조회
+
+`UsageApplication::query(names, policy)`가 다음 작업을 하나의 사용 사례로 제공합니다.
+
+1. 요청한 공급자 이름을 검증합니다.
+2. 설정 순서대로 공급자를 선택합니다.
+3. 공급자를 병렬로 조회합니다.
+4. 출력 어댑터에는 capability가 없는 `AgentInfo`와 결과만 반환합니다.
+
+출력 계층은 `UsageSource` 구현이나 공급자 선택 방법을 알지 못합니다. `FetchPolicy`는
+`PreferCached`와 `Fresh`만 표현하며, CLI의 `--live` 문법은 인바운드 어댑터에서 정책으로
+변환합니다.
+
+### 설정
+
+`SettingsApplication`이 기본값 선택·유효성 검사·저장을 함께 책임집니다.
+TOML 파싱과 파일 위치는 `FileSettingsRepository`가, `agents=claude,codex` 같은 명령행
+문법은 인바운드 어댑터가 맡습니다. composition root는 설정 저장소를 포트 뒤에 넣고
+애플리케이션에 주입합니다.
+
+### 상주 상태
+
+`WatchState`가 이전 성공 값 보존, 최근 오류, 분 단위 표본, 공급자별 상태를 관리합니다.
+표본 저장은 `HistoryRepository` 포트를 통해 수행하고 파일명·JSON·HOME 경로는 아웃바운드
+어댑터가 맡습니다. TUI는 이 상태를 렌더링할 뿐 저장이나 갱신 정책을 소유하지 않습니다.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Loading
+    Loading --> Current: 첫 조회 성공
+    Loading --> Failed: 첫 조회 실패
+    Current --> Current: 갱신 성공 / 값과 표본 교체
+    Current --> Stale: 갱신 실패 / 직전 값 보존
+    Stale --> Current: 다음 갱신 성공
+    Stale --> Stale: 연속 실패 / 직전 값 보존
 ```
-  Current session
-  ██████████████████████████████████░░░░░░░░░░░░░░  71% used
-  ██████████████████████████████████████████████░░  0 hour 15 minutes left
+
+시계열은 화면 제목이 아니라 `LimitId`로 키를 잡습니다. 제목이나 번역이 바뀌어도 같은
+한도의 표본이 끊기지 않습니다. 애플리케이션은 실제 측정 시각의 수치 표본만 저장하고,
+3행 Sparkline과 `+3%p` 문구는 presentation의 `history` 모듈이 만듭니다. 공급자·창 길이·
+시작·종료 시각이 포함된 유일한 파일을 사용하므로 재실행해도 같은 5시간/7일 창만 복원합니다.
+
+## Claude 획득 정책의 내부 포트
+
+Claude 어댑터 안에서도 정책과 기술을 분리합니다.
+
+```mermaid
+flowchart LR
+    SRC[ClaudeUsageSource] --> POLICY[캐시 우선·백오프 정책]
+    POLICY --> CACHE[CacheStore]
+    POLICY --> CLIENT[UsageClient]
+    POLICY --> CLOCK[Clock]
+    CACHE -. production .-> FS[파일시스템]
+    CLIENT -. production .-> HTTP[Anthropic API]
+    CLOCK -. production .-> SYS[시스템 시계]
 ```
 
-시간은 95% 지났는데 71% 만 썼으므로 이번 창은 여유가 있습니다.
-반대로 시간 게이지가 사용량보다 짧으면 이번 창은 일찍 소진됩니다.
+이 포트들은 Claude 어댑터 내부 전용입니다. 프로덕션에서는 파일·HTTP·시계를 연결하고,
+테스트에서는 메모리 구현을 연결한 `ClaudeUsageSource`를 공개 `UsageSource` 포트로 호출합니다.
+따라서 다음 정책을 홈 디렉터리나 네트워크 없이 검증합니다.
 
-창 길이를 어디서 얻는지는 도구마다 다릅니다.
-
-| | 창 길이 출처 |
-|---|---|
-| ccmeter | 응답에 없어 `kind` 로 유추 — `session`→5시간, `weekly*`→7일 |
-| codexmeter | 응답의 `windowDurationMins` 를 그대로 사용 |
-
-모르는 종류가 오면 시간 게이지를 만들지 않습니다. 잘못된 창 길이로 그리는 것보다
-안 그리는 편이 낫습니다.
-
-`time_bar()` 는 현재 시각을 **인자로 받습니다.** 내부에서 시계를 읽으면 호출 시점이
-조금만 달라져도 분이 내림되어 결과가 흔들리고, 테스트도 결정론적으로 쓸 수 없습니다.
-한 화면의 모든 항목은 같은 기준 시각을 씁니다.
-
-## 문구는 한곳에서 만듭니다
-
-두 도구의 출력이 눈으로 봐서 같아야 하므로, 제목과 각주 문구는 `meter.rs` 에 모았습니다.
-
-- `resets_text(at, tz)` → `Resets Aug 20 at 12:31pm (Asia/Seoul)`
-  오늘이든 아니든 **항상 날짜를 붙입니다.** 시각만 있으면 화면만 보고
-  오늘인지 내일인지 알 수 없습니다.
-- `window_title(duration_mins, scope)` → `Current week (all models)`
-  창 길이(분)로 `Current session` / `Current day` / `Current week` / `Current month` 를 고릅니다.
-- `time_left_label(remaining, with_days)` → `2 day 3 hour 15 minutes left`
-  단위를 단수로 고정합니다. 자릿수가 일정해야 여러 줄이 세로로 맞습니다.
-
-## 구획(pane)
-
-화면은 에이전트마다 하나의 구획으로 **좌우로** 나뉩니다 (`A | B`, tmux 의 수직 분할).
-단일 에이전트 도구는 구획이 하나인 특수한 경우이므로 **코드 경로가 하나**입니다.
-
-폭은 균등하게 줍니다 — 어느 에이전트가 더 넓어야 할 이유가 없고, 균등하면
-게이지 길이가 같아 서로 비교하기 쉽습니다.
-
-1회 출력(`plain`)은 터미널이 100칸 미만이면 세로로 쌓습니다. 좁은 화면에서
-폭 40짜리 게이지 두 개는 읽기 어렵습니다. 상주 모드는 항상 좌우로 나눕니다.
-
-조회는 [`multi::fetch_all`] 이 스레드로 **동시에** 합니다. 순차로 하면 가장 느린
-에이전트가 전체 대기 시간을 결정합니다 (Codex 는 app-server 기동에 ~1초 걸립니다).
-하나가 실패해도 그 구획에만 사유를 적고 나머지는 정상으로 보여줍니다.
+- 신선한 캐시는 HTTP를 호출하지 않습니다.
+- 오래된 캐시 갱신이 실패하면 직전 캐시를 `refresh_failed` 상태로 반환합니다.
+- `Fresh`는 캐시와 백오프를 건너뛰고 성공 시 백오프를 해제합니다.
+- 실패 시 음수 캐시를 기록합니다.
 
 ## 실행 모드
 
 ```mermaid
 flowchart TD
     A[실행] --> B{--json?}
-    B -->|예| C[JSON 출력 후 종료]
+    B -->|예| C[병렬 조회 후 JSON 출력]
     B -->|아니오| D{--watch 또는 --interval?}
-    D -->|아니오| E[1회 출력 후 종료]
-    D -->|예| F{stdout 이 TTY?}
+    D -->|아니오| E[병렬 조회 후 plain 출력]
+    D -->|예| F{stdout이 TTY인가?}
     F -->|아니오| E
-    F -->|예| G[ratatui 상주 모드]
+    F -->|예| G[워커 조회 + TUI 이벤트 루프]
 ```
 
-핵심은 **TTY 감지**입니다. ratatui 는 alternate screen 과 raw mode 를 쓰기 때문에
-`watch` 아래나 파이프에서는 동작할 수 없습니다. 그런 상황에서는 상주 모드를
-요청받았더라도 조용히 1회 출력으로 내려갑니다. 덕분에 `watch -n 60 ccmeter` 가
-그대로 동작합니다.
+TUI의 네트워크 조회는 워커 스레드가 수행합니다. 메인 스레드는 키 입력과 렌더링을 계속
+처리하므로 원격 타임아웃 중에도 `q`, `r`, `R`에 반응합니다. `r`은 캐시 우선,
+`R`은 강제 HTTP 조회 정책으로 전달됩니다. 출력이 파이프나 `watch` 아래라면
+alternate screen을 사용할 수 없으므로 자동으로 1회 plain 출력으로 내려갑니다.
 
-### 실패도 stdout 으로
+## 새 공급자 추가
 
-조회에 실패해도 오류 문구를 **stdout** 에 씁니다. `watch` 는 stdout 만 캡처하므로
-stderr 로 보내면 오류가 났을 때 화면이 빈 채로 남아, 멈춘 것인지 실패한 것인지
-구분할 수 없습니다. 종료 코드는 실패(`1`)로 돌려줍니다.
+1. `src/adapters/outbound/<provider>/`에서 외부 응답을 파싱합니다.
+2. 응답을 `UsageLimit` 목록으로 정규화합니다. 제목이나 색상은 만들지 않습니다.
+3. `UsageSource`를 구현해 `UsageSnapshot`을 반환합니다.
+4. `bootstrap.rs`에서 `RegisteredAgent`로 조립합니다.
+5. 필요하면 `src/bin/`에 공개 실행 함수만 호출하는 전용 바이너리를 추가합니다.
 
-## 상주 모드
+설정 검증, 병렬 조회, stale 값 보존, plain·TUI·JSON 표현은 기존 경로를 그대로 재사용합니다.
 
-네트워크 조회는 **워커 스레드**가 담당합니다. 메인 스레드에서 직접 부르면
-타임아웃(최대 15~20초) 동안 화면이 얼어붙고 `q` 조차 먹지 않습니다.
+## 관련 문서
 
-```mermaid
-sequenceDiagram
-    participant M as 메인 (이벤트 루프)
-    participant W as 워커 스레드
-    participant S as 에이전트
-    W->>S: 즉시 1회 조회
-    S-->>W: 결과
-    W->>M: Msg::Data
-    loop 1초 마다
-        M->>M: 키 입력 확인 + 화면 갱신
-    end
-    Note over W: interval 만큼 대기<br/>(요청 채널이 열리면 즉시 깨어남)
-    M->>W: r 키 → 새로고침 요청
-    W->>S: 조회
-```
+- [아키텍처 리뷰](architecture-review.html)
+- [Claude 조회 정책](ccmeter.md)
+- [Codex app-server 연동](codexmeter.md)
 
-조회가 실패해도 **직전 데이터를 지우지 않습니다.** 화면이 비는 것보다
-낡은 값이라도 남기고 푸터에 `갱신 실패` 를 띄우는 편이 낫습니다.
+## 후속 deepening 작업
 
-화면을 다시 그리는 주기(1초)는 키 반응성과 무관합니다. `event::poll` 은 키가 들어오면
-즉시 깨어나고, 이 값은 유휴 상태에서 `다음 N초` 카운트다운을 흘리는 간격일 뿐입니다.
-
-## 시계열 차트 (상주 모드)
-
-상주 모드는 조회할 때마다 각 한도의 사용률을 분 단위로 기록하고,
-한 줄짜리 텍스트 차트로 보여줍니다.
-
-```
- › Current session  +3%p
-   ██████████████████████████░░░░░░░░  62% used
-   ████████████████████████████████░░  0 hour 24 minutes left
-   ·····························▅▅▆··   ← 시계열 차트
-   Resets Aug 18 at 9:30pm (Asia/Seoul)
-```
-
-**가로축은 창 전체**입니다(세션 5시간 / 주간 7일). 바로 위 시간 게이지와 같은 축이라
-세로로 맞춰 읽힙니다 — 차트의 표본이 어느 지점에 찍혔는지가 곧 그 창의 어느 시점인지입니다.
-앱을 켜기 전 구간은 표본이 없으므로 `·` 로 비워 둡니다.
-
-**세로축은 0~100% 고정**입니다. 창 전체를 보는 맥락에서는 절대값이 맞습니다.
-
-제목 옆 `+3%p` 는 앱을 켠 뒤로 늘어난 양입니다. 차트 옆에 붙이면 폭이 밀려
-게이지와 축이 어긋나므로 제목 줄에 둡니다. 변화가 없으면 표시하지 않습니다.
-
-기록은 **메모리에만** 남습니다. 디스크에 쓰지 않으므로 "앱을 켠 뒤로" 만 보입니다.
-1회 실행에는 표본이 하나뿐이라 차트가 나오지 않습니다.
-
-같은 분에 여러 번 조회하면 한 칸으로 합치고 마지막 값을 남깁니다 —
-한 칸은 "그 분이 끝났을 때의 상태" 를 뜻합니다.
-
-창이 리셋되면 표본이 새 창의 앞쪽부터 다시 찍힙니다. 창 밖(이전 창)의 표본은
-그리지 않습니다.
-
-## 값의 출처와 신선도
-
-`Snapshot` 은 `Meter` 목록과 함께 **언제 어디서 가져왔는지**(`Origin`)를 담습니다.
-ccmeter 는 로컬 캐시를 읽을 수 있어서, 화면의 숫자가 방금 조회한 값인지
-몇 분 전 캐시인지 구분되어야 하기 때문입니다.
-
-```
-  기준 21:12 (2분 전, 로컬 캐시)
-  기준 21:13 (방금, 직접 조회)
-  기준 20:41 (34분 전, 로컬 캐시 · 갱신 실패)
-```
-
-마지막 형태는 갱신을 시도했지만 실패해 낡은 값을 보여주는 중이라는 뜻입니다.
-자세한 조회 전략은 [ccmeter.md](ccmeter.md) 를 보세요.
-
-## 갱신 주기
-
-원격 조회이므로 최소 30초로 자릅니다(기본 60초). 더 짧게 요청하면 값을 올리고
-그 사실을 알립니다. 데이터 자체가 그보다 자주 변하지 않고,
-`ccmeter` 쪽은 자주 부르면 실제로 `HTTP 429` 를 받습니다.
-
-## 새 에이전트 추가하기
-
-1. `src/<이름>/` 에 클라이언트와 응답 모델을 넣고 `to_meters()` 를,
-   그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 만듭니다.
-2. `registry.rs` 의 표에 한 줄 등록합니다. 설정 파일(`agents = [...]`)과
-   `agentmeter` 는 이 표만 보므로 다른 곳은 손댈 필요가 없습니다.
-3. 전용 바이너리를 원하면 `src/bin/<이름>meter.rs` 에 진입점을 둡니다.
-
-```rust
-fn main() -> ExitCode {
-    app::main("<이름>meter", "... 사용 한도를 한눈에 보여줍니다", make_fetch)
-}
-
-fn make_fetch(tz: String, live: bool) -> Fetch {
-    Box::new(move || <이름>::source::fetch(&tz))
-}
-```
-
-`tz` 는 `app` 이 프로세스당 한 번 해석해 넘겨줍니다. 시간대 해석은 OS 호출이라
-조회할 때마다 다시 하면 낭비입니다.
-
-3. `Cargo.toml` 에 `[[bin]]` 항목을 추가합니다.
-
-게이지, TUI, CLI 옵션, JSON 출력, 오류 처리는 손댈 필요가 없습니다.
+- [#6 설정과 선택 workflow 통합](https://github.com/yoophi/agentmeter/issues/6)
+- [#5 watch 갱신 스케줄 분리](https://github.com/yoophi/agentmeter/issues/5)
+- [#4 Claude 획득 정책 테스트 보강](https://github.com/yoophi/agentmeter/issues/4)
+- [#3 LimitKind 도메인 모델 추가](https://github.com/yoophi/agentmeter/issues/3)
+- [#2 ADR과 ubiquitous language 용어집 작성](https://github.com/yoophi/agentmeter/issues/2)

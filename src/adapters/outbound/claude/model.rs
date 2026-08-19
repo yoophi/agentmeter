@@ -8,9 +8,7 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
-use crate::meter::{
-    Bar, Level, Meter, Window, level_from_used, pending_bar, resets_text, time_bar, window_title,
-};
+use crate::domain::usage::{Severity, UsageLimit};
 
 /// 세션 한도 창 길이. 응답이 창 길이를 알려주지 않아 상수로 둔다
 /// (`five_hour` 라는 필드명과 `/usage` 화면이 근거다).
@@ -18,7 +16,7 @@ const SESSION_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(5);
 /// 주간 한도 창 길이 (`seven_day`).
 const WEEK_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(7);
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageResponse {
     #[serde(default)]
     pub limits: Vec<Limit>,
@@ -56,19 +54,6 @@ pub struct ScopeModel {
 }
 
 impl Limit {
-    /// 화면에 찍을 제목. 아는 종류는 공용 `window_title` 로 만들어
-    /// codexmeter 와 문구가 어긋나지 않게 한다.
-    /// 모르는 `kind` 가 와도 죽지 않고 그대로 보여준다.
-    pub fn title(&self) -> String {
-        match window_for(&self.kind) {
-            Some(w) => window_title(Some(w.num_minutes()), self.model_name()),
-            None => match (self.kind.replace('_', " "), self.model_name()) {
-                (pretty, Some(name)) => format!("{pretty} ({name})"),
-                (pretty, None) => pretty,
-            },
-        }
-    }
-
     pub fn model_name(&self) -> Option<&str> {
         self.scope
             .as_ref()?
@@ -79,13 +64,13 @@ impl Limit {
             .filter(|s| !s.is_empty())
     }
 
-    pub fn level(&self) -> Level {
+    pub fn severity(&self) -> Severity {
         match self.severity.as_deref() {
-            Some("normal") => Level::Normal,
-            Some("warning" | "warn" | "elevated") => Level::Warning,
-            Some("critical" | "exceeded" | "blocked") => Level::Critical,
+            Some("normal") => Severity::Normal,
+            Some("warning" | "warn" | "elevated") => Severity::Warning,
+            Some("critical" | "exceeded" | "blocked") => Severity::Critical,
             // 처음 보는 severity 는 소진율로 판단
-            _ => level_from_used(self.percent),
+            _ => Severity::from_used_percent(self.percent),
         }
     }
 
@@ -109,13 +94,8 @@ fn window_for(kind: &str) -> Option<chrono::TimeDelta> {
     }
 }
 
-/// 서버가 준 한도를 화면 표현으로 옮긴다.
-/// Claude 쪽은 **소진율**을 보여주므로 라벨이 `N% used` 다.
-pub fn to_meters(limits: &[Limit], tz: &str) -> Vec<Meter> {
-    // 한 번만 읽어 모든 항목이 같은 기준 시각을 쓰게 한다
-    let now = Local::now();
-    // 활성화되지 않은 모델별 주간 한도는 resets_at 이 null 일 수 있다.
-    // 같은 weekly 그룹의 전체 한도는 창 경계를 제공하므로 그 값을 공유한다.
+/// 서버가 준 한도를 공급자·화면에 독립적인 도메인 값으로 옮긴다.
+pub fn to_limits(limits: &[Limit]) -> Vec<UsageLimit> {
     let weekly_reset = limits
         .iter()
         .filter(|limit| limit.kind.starts_with("weekly"))
@@ -123,29 +103,23 @@ pub fn to_meters(limits: &[Limit], tz: &str) -> Vec<Meter> {
     limits
         .iter()
         .map(|l| {
-            // 타임스탬프는 한 번만 파싱해서 게이지와 각주가 함께 쓴다
-            let at = l.resets_at_local().or_else(|| {
-                if l.kind.starts_with("weekly") {
-                    weekly_reset
-                } else {
-                    None
-                }
-            });
-            let window = at
-                .zip(window_for(&l.kind))
-                .map(|(at, len)| Window { resets_at: at, len });
-            Meter {
-                title: l.title(),
-                usage: Bar::used(l.percent, Some(l.level())),
-                window,
-                time: Some(
-                    window
-                        .and_then(|w| time_bar(w.resets_at, w.len, now))
-                        .unwrap_or_else(pending_bar),
-                ),
-                footnote: at.map(|at| resets_text(at, tz)),
-                emphasized: l.is_active,
-            }
+            let scope = l.model_name().map(str::to_string);
+            let id = format!("{}:{}", l.kind, scope.as_deref().unwrap_or("all"));
+            UsageLimit::new(
+                id,
+                scope,
+                l.percent,
+                Some(l.severity()),
+                l.is_active,
+                window_for(&l.kind),
+                l.resets_at_local().or_else(|| {
+                    if l.kind.starts_with("weekly") {
+                        weekly_reset
+                    } else {
+                        None
+                    }
+                }),
+            )
         })
         .collect()
 }
@@ -166,9 +140,8 @@ mod tests {
         )
         .unwrap();
 
-        let meters = to_meters(&response.limits, "Asia/Seoul");
-        assert_eq!(meters[0].window, meters[1].window);
-        assert_eq!(meters[1].title, "Current week (Fable)");
-        assert!(meters[1].footnote.is_some());
+        let limits = to_limits(&response.limits);
+        assert_eq!(limits[0].window(), limits[1].window());
+        assert_eq!(limits[1].scope.as_deref(), Some("Fable"));
     }
 }
