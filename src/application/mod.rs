@@ -2,12 +2,16 @@
 
 mod error;
 mod ports;
+mod refresh;
 mod settings;
 mod usage;
 mod watch;
 
 pub(crate) use error::FetchError;
-pub(crate) use ports::{FetchPolicy, HistoryRepository, SettingsRepository, UsageSource};
+pub(crate) use ports::{
+    FetchPolicy, HistoryRepository, HistoryRestore, SettingsRepository, UsageSource, WindowHistory,
+};
+pub(crate) use refresh::{RefreshCoordinator, RefreshDecision};
 pub(crate) use settings::{Settings, SettingsApplication};
 pub(crate) use usage::{AgentInfo, AgentResult, RegisteredAgent, UsageApplication};
 pub(crate) use watch::{UsageSample, WatchPane, WatchState};

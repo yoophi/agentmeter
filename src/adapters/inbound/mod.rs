@@ -2,3 +2,4 @@
 
 pub(crate) mod cli;
 pub(crate) mod runner;
+pub(crate) mod web;

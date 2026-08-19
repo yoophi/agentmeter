@@ -2,6 +2,7 @@ pub(crate) mod history;
 pub(crate) mod model;
 pub(crate) mod plain;
 pub(crate) mod tui;
+pub(crate) mod web;
 
 use crate::application::AgentResult;
 use crate::domain::usage::{OriginKind, Severity, UsageSnapshot};

@@ -2,9 +2,24 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Local};
+
 use crate::domain::usage::{LimitId, UsageSnapshot, UsageWindow};
 
 use super::{FetchError, Settings, UsageSample};
+
+#[derive(Debug, Clone)]
+pub struct WindowHistory {
+    pub window: UsageWindow,
+    pub series: BTreeMap<LimitId, Vec<UsageSample>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HistoryRestore {
+    pub snapshot: Option<UsageSnapshot>,
+    pub windows: Vec<WindowHistory>,
+    pub warnings: Vec<String>,
+}
 
 /// 한 번의 사용량 조회 조건.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,16 +43,14 @@ pub trait SettingsRepository: Send + Sync {
 
 /// 한도 창별 표본을 파일 같은 외부 저장소에 보존하는 포트.
 pub trait HistoryRepository: Send + Sync {
-    fn load(
-        &self,
-        provider: &str,
-        window: UsageWindow,
-    ) -> anyhow::Result<BTreeMap<LimitId, Vec<UsageSample>>>;
+    /// 유효한 활성 창은 모두 복원하고, 손상된 파일은 warnings로 격리한다.
+    fn restore_active(&self, provider: &str, at: DateTime<Local>)
+    -> anyhow::Result<HistoryRestore>;
 
-    fn save(
+    /// snapshot을 해당 창 파일에 append하고 갱신된 창 이력을 돌려준다.
+    fn record(
         &self,
         provider: &str,
-        window: UsageWindow,
-        series: &BTreeMap<LimitId, Vec<UsageSample>>,
-    ) -> anyhow::Result<()>;
+        snapshot: &UsageSnapshot,
+    ) -> anyhow::Result<Vec<WindowHistory>>;
 }

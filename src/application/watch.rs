@@ -1,6 +1,6 @@
 //! 상주 조회에서 유지해야 하는 상태와 갱신 규칙.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Local};
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::usage::{LimitId, Origin, UsageSnapshot, UsageWindow};
 
-use super::{AgentInfo, AgentResult, HistoryRepository};
+use super::{AgentInfo, AgentResult, HistoryRepository, HistoryRestore, WindowHistory};
 
 const MAX_POINTS: usize = 512;
 
@@ -43,20 +43,39 @@ pub(crate) struct WatchPane {
     pub error: Option<String>,
     memory_history: BTreeMap<LimitId, Vec<UsageSample>>,
     window_history: BTreeMap<WindowKey, BTreeMap<LimitId, Vec<UsageSample>>>,
-    loaded_windows: BTreeSet<WindowKey>,
+    history_warning: Option<String>,
     repository: Option<Arc<dyn HistoryRepository>>,
 }
 
 impl WatchPane {
     fn new(agent: AgentInfo, repository: Option<Arc<dyn HistoryRepository>>) -> Self {
-        Self {
+        let mut pane = Self {
             agent,
             snapshot: None,
             error: None,
             memory_history: BTreeMap::new(),
             window_history: BTreeMap::new(),
-            loaded_windows: BTreeSet::new(),
+            history_warning: None,
             repository,
+        };
+        if let Some(repository) = &pane.repository {
+            match repository.restore_active(pane.agent.name, Local::now()) {
+                Ok(history) => pane.restore(history),
+                Err(error) => pane.error = Some(format!("히스토리 복원 실패: {error:#}")),
+            }
+        }
+        pane
+    }
+
+    fn restore(&mut self, restore: HistoryRestore) {
+        self.snapshot = restore.snapshot;
+        self.replace_windows(restore.windows);
+        if !restore.warnings.is_empty() {
+            self.history_warning = Some(format!(
+                "히스토리 부분 복원: {}",
+                restore.warnings.join(" · ")
+            ));
+            self.error = self.history_warning.clone();
         }
     }
 
@@ -78,15 +97,25 @@ impl WatchPane {
 
     fn record(&mut self, snapshot: &UsageSnapshot) -> anyhow::Result<()> {
         let minute = snapshot.origin.at.timestamp() / 60;
-        let mut dirty = BTreeMap::<WindowKey, UsageWindow>::new();
-
         for limit in &snapshot.limits {
-            if let Some(window) = limit.window() {
+            if limit.window().is_none() {
+                let points = self.memory_history.entry(limit.id.clone()).or_default();
+                record_sample(points, minute, limit.used_percent, MAX_POINTS);
+            }
+        }
+
+        if let Some(repository) = &self.repository {
+            let windows = repository.record(self.agent.name, snapshot)?;
+            self.replace_windows(windows);
+        } else {
+            for limit in &snapshot.limits {
+                let Some(window) = limit.window() else {
+                    continue;
+                };
                 let key = WindowKey::from(window);
                 if !key.contains(minute) {
                     continue;
                 }
-                self.ensure_loaded(key, window)?;
                 let points = self
                     .window_history
                     .entry(key)
@@ -99,34 +128,16 @@ impl WatchPane {
                     limit.used_percent,
                     key.duration_minutes as usize,
                 );
-                dirty.insert(key, window);
-            } else {
-                let points = self.memory_history.entry(limit.id.clone()).or_default();
-                record_sample(points, minute, limit.used_percent, MAX_POINTS);
-            }
-        }
-
-        if let Some(repository) = &self.repository {
-            for (key, window) in dirty {
-                repository.save(
-                    self.agent.name,
-                    window,
-                    self.window_history.get(&key).expect("기록한 window"),
-                )?;
             }
         }
         Ok(())
     }
 
-    fn ensure_loaded(&mut self, key: WindowKey, window: UsageWindow) -> anyhow::Result<()> {
-        if !self.loaded_windows.insert(key) {
-            return Ok(());
+    fn replace_windows(&mut self, windows: Vec<WindowHistory>) {
+        for history in windows {
+            self.window_history
+                .insert(WindowKey::from(history.window), history.series);
         }
-        if let Some(repository) = &self.repository {
-            let loaded = repository.load(self.agent.name, window)?;
-            self.window_history.insert(key, loaded);
-        }
-        Ok(())
     }
 }
 
@@ -187,10 +198,19 @@ impl WatchState {
                 Ok(snapshot) => {
                     let history_error = pane.record(&snapshot).err();
                     pane.snapshot = Some(snapshot);
-                    pane.error =
-                        history_error.map(|error| format!("히스토리 저장 실패: {error:#}"));
+                    pane.error = history_error
+                        .map(|error| format!("히스토리 저장 실패: {error:#}"))
+                        .or_else(|| pane.history_warning.clone());
                 }
-                Err(error) => pane.error = Some(error.to_string()),
+                Err(error) => {
+                    if let Some(snapshot) = &mut pane.snapshot {
+                        snapshot.origin.refresh_failed = true;
+                    }
+                    pane.error = Some(match &pane.history_warning {
+                        Some(warning) => format!("{error} · {warning}"),
+                        None => error.to_string(),
+                    });
+                }
             }
         }
     }

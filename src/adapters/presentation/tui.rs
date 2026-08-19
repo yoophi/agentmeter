@@ -15,7 +15,8 @@ use ratatui::widgets::{Gauge, Paragraph, Sparkline};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::application::{
-    AgentResult, FetchPolicy, HistoryRepository, UsageApplication, WatchPane, WatchState,
+    AgentResult, FetchPolicy, HistoryRepository, RefreshCoordinator, RefreshDecision,
+    UsageApplication, WatchPane, WatchState,
 };
 use crate::domain::usage::Severity;
 
@@ -67,10 +68,23 @@ pub(crate) fn run(
 ) -> Result<()> {
     let interval = Duration::from_secs(interval_secs);
     let (tx, rx) = mpsc::channel::<Round>();
-    let (request_tx, request_rx) = mpsc::channel::<bool>();
+    let (request_tx, request_rx) = mpsc::channel::<FetchPolicy>();
     let agents = application.info(&names)?;
+    let refresh = Arc::new(RefreshCoordinator::new(live));
+    let initial = match refresh.request(false) {
+        RefreshDecision::Execute(policy) => policy,
+        RefreshDecision::Queued => unreachable!("idle coordinator queues initial refresh"),
+    };
 
-    spawn_worker(tx, request_rx, interval, application, names, live);
+    spawn_worker(
+        tx,
+        request_rx,
+        interval,
+        application,
+        names,
+        Arc::clone(&refresh),
+        initial,
+    );
 
     let mut app = App {
         prog: prog.to_string(),
@@ -82,30 +96,39 @@ pub(crate) fn run(
     };
 
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &rx, &request_tx);
+    let result = event_loop(&mut terminal, &mut app, &rx, &request_tx, &refresh);
     ratatui::restore();
     result
 }
 
 fn spawn_worker(
     tx: Sender<Round>,
-    request_rx: Receiver<bool>,
+    request_rx: Receiver<FetchPolicy>,
     interval: Duration,
     application: UsageApplication,
     names: Vec<String>,
-    live: bool,
+    refresh: Arc<RefreshCoordinator>,
+    initial: FetchPolicy,
 ) {
     thread::spawn(move || {
-        let mut force_live = false;
+        let mut policy = initial;
         loop {
-            let policy = fetch_policy(live, force_live);
             let results = application.query(&names, policy).unwrap_or_default();
             if tx.send(Round(results)).is_err() {
                 return;
             }
+            if let Some(pending) = refresh.complete() {
+                policy = pending;
+                continue;
+            }
             match request_rx.recv_timeout(interval) {
-                Ok(force) => force_live = force,
-                Err(RecvTimeoutError::Timeout) => force_live = false,
+                Ok(requested) => policy = requested,
+                Err(RecvTimeoutError::Timeout) => {
+                    policy = match refresh.request(false) {
+                        RefreshDecision::Execute(policy) => policy,
+                        RefreshDecision::Queued => continue,
+                    };
+                }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -116,7 +139,8 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     rx: &Receiver<Round>,
-    request_tx: &Sender<bool>,
+    request_tx: &Sender<FetchPolicy>,
+    refresh: &RefreshCoordinator,
 ) -> Result<()> {
     loop {
         while let Ok(round) = rx.try_recv() {
@@ -136,20 +160,14 @@ fn event_loop(
                     return Ok(());
                 }
                 code => {
-                    if let Some(force_live) = refresh_request(code) {
-                        let _ = request_tx.send(force_live);
+                    if let Some(force_live) = refresh_request(code)
+                        && let RefreshDecision::Execute(policy) = refresh.request(force_live)
+                    {
+                        let _ = request_tx.send(policy);
                     }
                 }
             }
         }
-    }
-}
-
-fn fetch_policy(live: bool, force_live: bool) -> FetchPolicy {
-    if live || force_live {
-        FetchPolicy::Fresh
-    } else {
-        FetchPolicy::PreferCached
     }
 }
 
@@ -593,8 +611,6 @@ mod tests {
     fn refresh_keys_choose_cached_or_fresh_policy() {
         assert_eq!(refresh_request(KeyCode::Char('r')), Some(false));
         assert_eq!(refresh_request(KeyCode::Char('R')), Some(true));
-        assert_eq!(fetch_policy(false, false), FetchPolicy::PreferCached);
-        assert_eq!(fetch_policy(false, true), FetchPolicy::Fresh);
     }
 
     #[test]

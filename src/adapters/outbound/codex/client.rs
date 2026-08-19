@@ -19,7 +19,10 @@ use serde_json::Value;
 use super::model::RateLimitsResponse;
 use crate::application::FetchError;
 
+#[cfg(not(test))]
 const TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_ID: i64 = 2;
 
 /// `codex` 실행 파일. `CODEX_BIN` 으로 바꿀 수 있다.
@@ -90,9 +93,20 @@ fn talk(child: &mut Child) -> Result<RateLimitsResponse, FetchError> {
                 TIMEOUT.as_secs()
             )));
         }
-        let line = rx.recv_timeout(remaining).map_err(|_| {
-            FetchError::Other(anyhow!("app-server 가 응답을 마치기 전에 종료되었습니다"))
-        })?;
+        let line = match rx.recv_timeout(remaining) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(FetchError::Other(anyhow!(
+                    "app-server 가 {}초 안에 응답하지 않았습니다",
+                    TIMEOUT.as_secs()
+                )));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(FetchError::Other(anyhow!(
+                    "app-server 가 응답을 마치기 전에 종료되었습니다"
+                )));
+            }
+        };
 
         // 알림(notification)이 섞여 오므로 우리 요청 id 만 골라낸다
         match take_response(&line) {
