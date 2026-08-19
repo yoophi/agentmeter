@@ -324,6 +324,13 @@ cargo test
 [#5](https://github.com/yoophi/agentmeter/issues/5),
 [#6](https://github.com/yoophi/agentmeter/issues/6).
 
+## 버전 정책
+
+agentmeter는 zero-padding 없는 CalVer 형식인 `YYYY.M.#`로 버전을 관리합니다.
+`YYYY`는 릴리스 연도, `M`은 릴리스 월, `#`는 해당 월의 릴리스 순번입니다.
+예를 들어 2026년 8월의 첫 번째 릴리스는 `2026.8.1`, 두 번째 릴리스는
+`2026.8.2`입니다.
+
 ## 설치
 
 ```bash
