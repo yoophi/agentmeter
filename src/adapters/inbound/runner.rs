@@ -1,6 +1,7 @@
 //! CLI 명령을 애플리케이션 사용 사례에 연결한다.
 
 use std::io::{IsTerminal, Write};
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use super::cli::{self, Cli};
+use super::web;
 use crate::adapters::presentation::{self, plain};
 use crate::application::{
     AgentResult, FetchError, FetchPolicy, HistoryRepository, UsageApplication,
@@ -32,6 +34,33 @@ struct Root {
 enum Command {
     /// 표시할 에이전트를 설정합니다
     Config(ConfigArgs),
+    /// 브라우저에서 보는 로컬 실시간 대시보드를 실행합니다
+    Web(WebArgs),
+}
+
+#[derive(Debug, Args)]
+struct WebArgs {
+    /// 캐시를 건너뛰고 매 주기 직접 조회합니다
+    #[arg(long)]
+    live: bool,
+
+    /// 갱신 주기(초)
+    #[arg(short = 'n', long, value_name = "SECS", default_value_t = cli::DEFAULT_INTERVAL)]
+    interval: u64,
+
+    /// 고정 포트로 실행합니다 (생략하면 ephemeral port)
+    #[arg(long, value_name = "PORT")]
+    port: Option<u16>,
+
+    /// 서버가 바인딩할 IP 주소
+    #[arg(long, value_name = "HOST", default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+    host: IpAddr,
+}
+
+impl WebArgs {
+    fn interval_secs(&self) -> u64 {
+        self.interval.max(cli::MIN_INTERVAL)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -61,6 +90,13 @@ pub(crate) fn main_agentmeter() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => report_error(MULTI_PROG, error),
         },
+        Some(Command::Web(arguments)) => match runtime.settings.load() {
+            Ok(settings) => match web_command(arguments, runtime, settings.agents) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => report_error(MULTI_PROG, error),
+            },
+            Err(error) => report_error(MULTI_PROG, error),
+        },
         None => match runtime.settings.load() {
             Ok(settings) => finish(
                 MULTI_PROG,
@@ -72,6 +108,26 @@ pub(crate) fn main_agentmeter() -> ExitCode {
             Err(error) => report_error(MULTI_PROG, error),
         },
     }
+}
+
+fn web_command(arguments: WebArgs, runtime: Runtime, names: Vec<String>) -> Result<()> {
+    if arguments.interval < cli::MIN_INTERVAL {
+        eprintln!(
+            "{MULTI_PROG}: 갱신 주기를 {}초로 올렸습니다 (원격 조회라 최소 {}초)",
+            arguments.interval_secs(),
+            cli::MIN_INTERVAL
+        );
+    }
+    web::run(web::Options {
+        application: runtime.usage,
+        history: runtime.history,
+        names,
+        timezone: local_timezone(),
+        interval_secs: arguments.interval_secs(),
+        port: arguments.port,
+        host: arguments.host,
+        live: arguments.live,
+    })
 }
 
 pub(crate) fn main_single(
@@ -321,5 +377,51 @@ mod tests {
         );
         assert_eq!(split_list("claude, codex,"), vec!["claude", "codex"]);
         assert!(split_assignment("agents").is_err());
+    }
+
+    #[test]
+    fn web_interval_uses_the_same_remote_floor() {
+        assert_eq!(
+            WebArgs {
+                live: false,
+                interval: 1,
+                port: None,
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            }
+            .interval_secs(),
+            cli::MIN_INTERVAL
+        );
+    }
+
+    #[test]
+    fn web_is_an_explicit_subcommand() {
+        let root = Root::try_parse_from([
+            "agentmeter",
+            "web",
+            "--live",
+            "--interval",
+            "90",
+            "--port",
+            "8080",
+            "--host",
+            "0.0.0.0",
+        ])
+        .unwrap();
+        let Some(Command::Web(arguments)) = root.command else {
+            panic!("web subcommand를 파싱해야 함");
+        };
+        assert!(arguments.live);
+        assert_eq!(arguments.interval_secs(), 90);
+        assert_eq!(arguments.port, Some(8080));
+        assert_eq!(arguments.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn web_host_defaults_to_ipv4_loopback() {
+        let root = Root::try_parse_from(["agentmeter", "web"]).unwrap();
+        let Some(Command::Web(arguments)) = root.command else {
+            panic!("web subcommand를 파싱해야 함");
+        };
+        assert_eq!(arguments.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 }

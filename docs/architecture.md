@@ -23,7 +23,7 @@ flowchart LR
 
 - `src/domain/` — `UsageLimit`, `UsageSnapshot`, `Origin`, `UsageWindow` 같은 순수 도메인 값
 - `src/application/` — 공급자 선택·병렬 조회, 설정, watch 상태와 아웃바운드 포트
-- `src/adapters/inbound/` — CLI 문법과 1회·JSON·상주 실행 모드
+- `src/adapters/inbound/` — CLI 문법과 1회·JSON·TUI·로컬 웹 실행 모드
 - `src/adapters/outbound/claude/` — Claude 캐시, 자격증명, HTTP 어댑터
 - `src/adapters/outbound/codex/` — Codex app-server JSONL 어댑터
 - `src/adapters/outbound/config.rs` — TOML 설정 저장소
@@ -90,15 +90,21 @@ TOML 파싱과 파일 위치는 `FileSettingsRepository`가, `agents=claude,code
 
 ### 상주 상태
 
-`WatchState`가 이전 성공 값 보존, 최근 오류, 분 단위 표본, 공급자별 상태를 관리합니다.
-표본 저장은 `HistoryRepository` 포트를 통해 수행하고 파일명·JSON·HOME 경로는 아웃바운드
-어댑터가 맡습니다. TUI는 이 상태를 렌더링할 뿐 저장이나 갱신 정책을 소유하지 않습니다.
+`WatchState`가 이전 성공 값 보존, 최근 오류와 공급자별 상태를 관리합니다.
+`HistoryRepository` 포트는 raw 파일 작업 대신 활성 창 복원과 snapshot 기록이라는 lifecycle을
+제공합니다. 파일명·JSON·원자적 교체뿐 아니라 구형 ID 병합, scope 복원, 표본 용량 제한도
+아웃바운드 어댑터 안에 숨깁니다. 시작할 때 현재 시각을 포함하는 활성 창을 먼저 복원하므로
+첫 원격 조회가 실패해도 저장된 5시간/7일 값과 오류를 함께 표시합니다. 파일 하나가
+손상되어도 정상 창은 부분 복원하고 경고를 함께 표시합니다.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Loading
+    [*] --> Cached: 활성 이력 복원
     Loading --> Current: 첫 조회 성공
     Loading --> Failed: 첫 조회 실패
+    Cached --> Current: 첫 조회 성공
+    Cached --> Stale: 첫 조회 실패 / 이력 보존
     Current --> Current: 갱신 성공 / 값과 표본 교체
     Current --> Stale: 갱신 실패 / 직전 값 보존
     Stale --> Current: 다음 갱신 성공
@@ -148,9 +154,35 @@ flowchart TD
 ```
 
 TUI의 네트워크 조회는 워커 스레드가 수행합니다. 메인 스레드는 키 입력과 렌더링을 계속
-처리하므로 원격 타임아웃 중에도 `q`, `r`, `R`에 반응합니다. `r`은 캐시 우선,
-`R`은 강제 HTTP 조회 정책으로 전달됩니다. 출력이 파이프나 `watch` 아래라면
+처리하므로 원격 타임아웃 중에도 `q`, `r`, `R`에 반응합니다. application의
+`RefreshCoordinator`가 TUI와 웹의 공통 refresh state machine을 소유합니다. 조회 중 들어온
+요청은 하나로 합치고 `R`/Fresh 요청을 우선해 현재 조회 직후 한 번만 실행합니다. thread/channel과
+Tokio task는 각 adapter에 남습니다. 출력이 파이프나 `watch` 아래라면
 alternate screen을 사용할 수 없으므로 자동으로 1회 plain 출력으로 내려갑니다.
+
+웹 모드는 `agentmeter web`이라는 별도 인바운드 인터페이스를 사용합니다. Axum 서버는
+기본적으로 `127.0.0.1:0`에 바인딩하며 `--host`와 `--port`가 있으면 지정한 주소를
+사용해 Tokio 런타임에서 HTTP를 처리합니다. 기존 공급자 어댑터는
+동기 I/O이므로 `spawn_blocking`으로 격리해 HTTP executor를 막지 않습니다. background
+refresh가 `UsageApplication`과 `WatchState`를 갱신하고, HTTP handler는 presentation의
+웹 projection 결과만 JSON으로 반환합니다. window 시작·종료, SVG area path와 시간 marker
+좌표는 Rust projection이 계산하며 browser는 그리기와 server clock 기준 1초 countdown만
+담당합니다.
+
+```mermaid
+flowchart LR
+    B[Browser] -->|GET /api/dashboard| AX[Axum inbound adapter]
+    AX --> WP[web JSON projection]
+    BG[Tokio refresh task] --> RC[RefreshCoordinator]
+    RC -->|spawn_blocking| UA[UsageApplication]
+    UA --> WS[WatchState]
+    WS --> WP
+    WP --> B
+```
+
+HTML/CSS/JavaScript는 실행 파일에 포함하고 외부 CDN을 사용하지 않습니다. 브라우저는
+JSON을 2초마다 읽어 bar chart와 SVG area chart를 갱신하며, 실제 provider 조회는
+설정된 30초 이상의 주기로만 수행합니다.
 
 ## 새 공급자 추가
 
@@ -171,7 +203,6 @@ alternate screen을 사용할 수 없으므로 자동으로 1회 plain 출력으
 ## 후속 deepening 작업
 
 - [#6 설정과 선택 workflow 통합](https://github.com/yoophi/agentmeter/issues/6)
-- [#5 watch 갱신 스케줄 분리](https://github.com/yoophi/agentmeter/issues/5)
 - [#4 Claude 획득 정책 테스트 보강](https://github.com/yoophi/agentmeter/issues/4)
 - [#3 LimitKind 도메인 모델 추가](https://github.com/yoophi/agentmeter/issues/3)
 - [#2 ADR과 ubiquitous language 용어집 작성](https://github.com/yoophi/agentmeter/issues/2)

@@ -108,6 +108,30 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 출력이 터미널이 아니면(파이프, `watch` 아래) 자동으로 1회 출력으로 내려갑니다.
 전체 화면 TUI 는 alternate screen 을 쓰기 때문에 `watch` 안에서는 동작할 수 없습니다.
 
+### 웹 대시보드
+
+```bash
+agentmeter web                  # 캐시 우선, 기본 60초 갱신
+agentmeter web --live           # 매 주기 직접 조회
+agentmeter web --interval 120   # 120초마다 갱신
+agentmeter web --port 8080      # 127.0.0.1:8080 고정 포트
+agentmeter web --host 0.0.0.0   # 모든 IPv4 인터페이스에 바인딩
+```
+
+기본적으로 `127.0.0.1`과 운영체제가 고른 ephemeral port를 사용하고 실제 주소를
+출력합니다. 예: `agentmeter web: http://127.0.0.1:54321`. `--port`로 포트를,
+`--host`로 바인딩 IP를 지정할 수 있습니다. `--host 0.0.0.0`은 인증과 TLS가 없는
+대시보드를 네트워크에 노출할 수 있으므로 신뢰할 수 있는 네트워크에서만 사용하세요.
+설정 파일의
+`agents` 순서를 그대로 사용하며, 한 agent면 한 pane, 두 agent면 좌우 두 pane으로
+표시합니다. 좁은 브라우저에서는 pane을 세로로 쌓습니다.
+
+사용량은 bar chart, 현재 5시간/7일 창의 영속 히스토리는 area chart로 표시합니다.
+브라우저의 `Refresh`는 캐시 우선, `Live HTTP`는 Claude 캐시와 백오프를 건너뛰는
+직접 조회입니다. HTML/CSS/JavaScript는 바이너리에 포함되어 외부 CDN이 필요 없습니다.
+
+자세한 내용은 [docs/web-dashboard.md](docs/web-dashboard.md)를 보세요.
+
 ## 동작 방식
 
 ### ccmeter
@@ -182,6 +206,7 @@ ccmeter 가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본 경로
 - [docs/architecture-review.html](docs/architecture-review.html) — 헥사고날 아키텍처 전체 리뷰
 - [docs/ccmeter.md](docs/ccmeter.md) — 캐시 우선 조회, 자격증명, 429 대응
 - [docs/codexmeter.md](docs/codexmeter.md) — app-server 프로토콜, 응답 처리
+- [docs/web-dashboard.md](docs/web-dashboard.md) — 로컬 서버, 갱신 흐름, JSON projection
 
 ## 아키텍처
 
@@ -199,13 +224,15 @@ flowchart LR
     BOOT[bootstrap<br/>composition root] --> APP
     BOOT --> OUT
     IN --> PRES
+    WEB[Axum + Tokio<br/>local web] --> APP
+    WEB --> PRES
 ```
 
 | 위치 | 책임 | 알면 안 되는 것 |
 |---|---|---|
 | `src/domain/` | `UsageLimit`, `UsageSnapshot`, `Origin`, 시간 창과 순수 규칙 | provider 응답 타입, I/O, CLI, 화면 문구·색상 |
 | `src/application/` | 공급자 검증·병렬 조회, 설정, watch 상태, outbound port | Clap, ratatui, HTTP·파일 구현 |
-| `src/adapters/inbound/` | CLI 문법, 실행 모드, application 호출 | provider 내부 구현, 인증·캐시 세부사항 |
+| `src/adapters/inbound/` | CLI 문법, TUI·웹 실행 모드, application 호출 | provider 내부 구현, 인증·캐시 세부사항 |
 | `src/adapters/outbound/` | 외부 응답 파싱, domain 정규화, 설정·히스토리 port 구현 | `Meter`, 게이지·각주 같은 화면 표현 |
 | `src/adapters/presentation/` | domain snapshot을 `Meter`로 투영하고 plain·TUI·JSON 출력 | 네트워크, 인증, 설정 파일 저장 |
 | `src/bootstrap.rs` | 구체 adapter를 port에 연결 | 비즈니스 규칙과 출력 formatting |
