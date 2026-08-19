@@ -67,7 +67,7 @@ fn origin_name(origin: OriginKind) -> &'static str {
     }
 }
 
-/// `--json` 출력. 두 도구가 같은 형태를 내보낸다.
+/// 단일 agent의 `--json` 출력.
 fn to_json(snapshot: &UsageSnapshot, timezone: &str) -> anyhow::Result<String> {
     #[derive(serde::Serialize)]
     struct Row<'a> {

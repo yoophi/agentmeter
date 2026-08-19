@@ -1,4 +1,4 @@
-# codexmeter 내부 동작
+# Codex provider app-server 연동
 
 Codex 의 `/status` 가 보여주는 한도 값을 가져옵니다.
 
@@ -32,7 +32,7 @@ Codex 는 이 인터페이스를 `[experimental]` 로 표시하고 있어 바뀔
 
 ```mermaid
 sequenceDiagram
-    participant C as codexmeter
+    participant C as agentmeter
     participant S as codex app-server
     C->>S: {"id":1,"method":"initialize","params":{"clientInfo":{...}}}
     S-->>C: {"id":1,"result":{"codexHome":...}}
@@ -90,7 +90,7 @@ sequenceDiagram
 늘 0 이라 줄만 차지합니다. 창 길이가 없는 항목도 제외합니다 — 시간 게이지를
 만들 수 없기 때문입니다.
 
-### 표기를 ccmeter 와 맞춘다
+### provider 간 표기를 맞춘다
 
 Codex 의 `/status` 는 남은 비율로 보여줍니다:
 
@@ -99,7 +99,7 @@ Weekly limit:                     [    ] 71% left (resets 12:31 on 20 Aug)
 GPT-5.3-Codex-Spark Weekly limit: [    ] 100% left (resets 18:37 on 25 Aug)
 ```
 
-`codexmeter` 는 두 도구의 표기를 통일하기 위해 **소진율**로 바꿔 보여줍니다.
+agentmeter는 provider 간 표기를 통일하기 위해 **소진율**로 바꿔 보여줍니다.
 원본이 `usedPercent` 이므로 `100 - x` 변환이 아니라 그 값을 그대로 씁니다.
 
 ```
@@ -118,7 +118,7 @@ GPT-5.3-Codex-Spark Weekly limit: [    ] 100% left (resets 18:37 on 25 Aug)
 ## 캐시가 없는 이유
 
 `account/rateLimits/read` 는 호출 제한이 없고 app-server 가 값을 들고 있어
-매번 직접 조회해도 무리가 없습니다. 그래서 ccmeter 와 달리 캐시 계층이 없고,
+매번 직접 조회해도 무리가 없습니다. 그래서 Claude provider와 달리 캐시 계층이 없고,
 `Origin` 은 항상 `Live` 입니다. `--live` 는 무시됩니다.
 
 ## 참고: 관측된 코드네임
