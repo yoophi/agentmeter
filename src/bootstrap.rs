@@ -6,12 +6,16 @@ use std::sync::Arc;
 use crate::adapters::outbound::claude::source::ClaudeUsageSource;
 use crate::adapters::outbound::codex::source::CodexUsageSource;
 use crate::adapters::outbound::config::FileSettingsRepository;
-use crate::application::{AgentInfo, RegisteredAgent, SettingsApplication, UsageApplication};
+use crate::adapters::outbound::history::FileHistoryRepository;
+use crate::application::{
+    AgentInfo, HistoryRepository, RegisteredAgent, SettingsApplication, UsageApplication,
+};
 
 pub(crate) struct Runtime {
     pub(crate) usage: UsageApplication,
     pub(crate) settings: SettingsApplication,
     pub(crate) settings_path: PathBuf,
+    pub(crate) history: Arc<dyn HistoryRepository>,
 }
 
 /// 프로덕션 어댑터는 오직 이곳에서 애플리케이션 포트에 연결한다.
@@ -36,10 +40,12 @@ pub(crate) fn production() -> anyhow::Result<Runtime> {
     let repository = FileSettingsRepository;
     let settings_path = repository.path()?;
     let settings = SettingsApplication::new(Arc::new(repository), usage.names());
+    let history: Arc<dyn HistoryRepository> = Arc::new(FileHistoryRepository::production());
 
     Ok(Runtime {
         usage,
         settings,
         settings_path,
+        history,
     })
 }

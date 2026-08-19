@@ -1,57 +1,142 @@
 //! 상주 조회에서 유지해야 하는 상태와 갱신 규칙.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
 
-use crate::domain::usage::{LimitId, Origin, UsageSnapshot};
+use crate::domain::usage::{LimitId, Origin, UsageSnapshot, UsageWindow};
 
-use super::{AgentInfo, AgentResult};
+use super::{AgentInfo, AgentResult, HistoryRepository};
 
 const MAX_POINTS: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct UsageSample {
     pub minute: i64,
     pub percent: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct WindowKey {
+    duration_minutes: i64,
+    resets_at_minute: i64,
+}
+
+impl WindowKey {
+    fn from(window: UsageWindow) -> Self {
+        Self {
+            duration_minutes: window.duration.num_minutes(),
+            resets_at_minute: (window.resets_at.timestamp() + 30).div_euclid(60),
+        }
+    }
+
+    fn contains(self, minute: i64) -> bool {
+        self.resets_at_minute - self.duration_minutes <= minute && minute < self.resets_at_minute
+    }
 }
 
 pub(crate) struct WatchPane {
     pub agent: AgentInfo,
     pub snapshot: Option<UsageSnapshot>,
     pub error: Option<String>,
-    history: BTreeMap<LimitId, Vec<UsageSample>>,
+    memory_history: BTreeMap<LimitId, Vec<UsageSample>>,
+    window_history: BTreeMap<WindowKey, BTreeMap<LimitId, Vec<UsageSample>>>,
+    loaded_windows: BTreeSet<WindowKey>,
+    repository: Option<Arc<dyn HistoryRepository>>,
 }
 
 impl WatchPane {
-    fn new(agent: AgentInfo) -> Self {
+    fn new(agent: AgentInfo, repository: Option<Arc<dyn HistoryRepository>>) -> Self {
         Self {
             agent,
             snapshot: None,
             error: None,
-            history: BTreeMap::new(),
+            memory_history: BTreeMap::new(),
+            window_history: BTreeMap::new(),
+            loaded_windows: BTreeSet::new(),
+            repository,
         }
     }
 
-    pub(crate) fn samples(&self, id: &LimitId) -> &[UsageSample] {
-        self.history.get(id).map(Vec::as_slice).unwrap_or_default()
+    pub(crate) fn samples(&self, id: &LimitId, window: Option<UsageWindow>) -> &[UsageSample] {
+        match window {
+            Some(window) => self
+                .window_history
+                .get(&WindowKey::from(window))
+                .and_then(|series| series.get(id))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            None => self
+                .memory_history
+                .get(id)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        }
     }
 
-    fn record(&mut self, snapshot: &UsageSnapshot, at: DateTime<Local>) {
-        let minute = at.timestamp() / 60;
+    fn record(&mut self, snapshot: &UsageSnapshot) -> anyhow::Result<()> {
+        let minute = snapshot.origin.at.timestamp() / 60;
+        let mut dirty = BTreeMap::<WindowKey, UsageWindow>::new();
+
         for limit in &snapshot.limits {
-            let points = self.history.entry(limit.id.clone()).or_default();
-            match points.last_mut() {
-                Some(last) if last.minute == minute => last.percent = limit.used_percent,
-                _ => points.push(UsageSample {
+            if let Some(window) = limit.window() {
+                let key = WindowKey::from(window);
+                if !key.contains(minute) {
+                    continue;
+                }
+                self.ensure_loaded(key, window)?;
+                let points = self
+                    .window_history
+                    .entry(key)
+                    .or_default()
+                    .entry(limit.id.clone())
+                    .or_default();
+                record_sample(
+                    points,
                     minute,
-                    percent: limit.used_percent,
-                }),
-            }
-            if points.len() > MAX_POINTS {
-                points.remove(0);
+                    limit.used_percent,
+                    key.duration_minutes as usize,
+                );
+                dirty.insert(key, window);
+            } else {
+                let points = self.memory_history.entry(limit.id.clone()).or_default();
+                record_sample(points, minute, limit.used_percent, MAX_POINTS);
             }
         }
+
+        if let Some(repository) = &self.repository {
+            for (key, window) in dirty {
+                repository.save(
+                    self.agent.name,
+                    window,
+                    self.window_history.get(&key).expect("기록한 window"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_loaded(&mut self, key: WindowKey, window: UsageWindow) -> anyhow::Result<()> {
+        if !self.loaded_windows.insert(key) {
+            return Ok(());
+        }
+        if let Some(repository) = &self.repository {
+            let loaded = repository.load(self.agent.name, window)?;
+            self.window_history.insert(key, loaded);
+        }
+        Ok(())
+    }
+}
+
+fn record_sample(points: &mut Vec<UsageSample>, minute: i64, percent: f64, capacity: usize) {
+    match points.last_mut() {
+        Some(last) if last.minute == minute => last.percent = percent,
+        _ => points.push(UsageSample { minute, percent }),
+    }
+    if points.len() > capacity {
+        points.drain(..points.len() - capacity);
     }
 }
 
@@ -60,9 +145,27 @@ pub(crate) struct WatchState {
 }
 
 impl WatchState {
+    #[cfg(test)]
     pub(crate) fn new(agents: Vec<AgentInfo>) -> Self {
+        Self::with_repository(agents, None)
+    }
+
+    pub(crate) fn persistent(
+        agents: Vec<AgentInfo>,
+        repository: Arc<dyn HistoryRepository>,
+    ) -> Self {
+        Self::with_repository(agents, Some(repository))
+    }
+
+    fn with_repository(
+        agents: Vec<AgentInfo>,
+        repository: Option<Arc<dyn HistoryRepository>>,
+    ) -> Self {
         Self {
-            panes: agents.into_iter().map(WatchPane::new).collect(),
+            panes: agents
+                .into_iter()
+                .map(|agent| WatchPane::new(agent, repository.clone()))
+                .collect(),
         }
     }
 
@@ -70,8 +173,8 @@ impl WatchState {
         &self.panes
     }
 
-    /// 성공은 새 값과 표본을 반영하고, 실패는 직전 값을 보존한 채 오류만 기록한다.
-    pub(crate) fn apply(&mut self, results: Vec<AgentResult>, at: DateTime<Local>) {
+    /// 성공은 새 값과 실측 시각의 표본을 반영하고, 실패는 직전 값을 보존한다.
+    pub(crate) fn apply(&mut self, results: Vec<AgentResult>) {
         for result in results {
             let Some(pane) = self
                 .panes
@@ -82,9 +185,10 @@ impl WatchState {
             };
             match result.result {
                 Ok(snapshot) => {
-                    pane.record(&snapshot, at);
+                    let history_error = pane.record(&snapshot).err();
                     pane.snapshot = Some(snapshot);
-                    pane.error = None;
+                    pane.error =
+                        history_error.map(|error| format!("히스토리 저장 실패: {error:#}"));
                 }
                 Err(error) => pane.error = Some(error.to_string()),
             }
@@ -127,7 +231,7 @@ mod tests {
         }
     }
 
-    fn snapshot(percent: f64) -> UsageSnapshot {
+    fn snapshot(percent: f64, minute: u32) -> UsageSnapshot {
         UsageSnapshot::live(
             vec![UsageLimit::new(
                 "session:all",
@@ -138,28 +242,21 @@ mod tests {
                 Some(TimeDelta::hours(5)),
                 Some(at(30)),
             )],
-            at(0),
+            at(minute),
         )
     }
 
     #[test]
     fn failed_refresh_keeps_the_last_snapshot() {
         let mut state = WatchState::new(vec![info()]);
-        state.apply(
-            vec![AgentResult {
-                agent: info(),
-                result: Ok(snapshot(42.0)),
-            }],
-            at(0),
-        );
-        state.apply(
-            vec![AgentResult {
-                agent: info(),
-                result: Err(FetchError::Other(anyhow::anyhow!("temporary"))),
-            }],
-            at(1),
-        );
-
+        state.apply(vec![AgentResult {
+            agent: info(),
+            result: Ok(snapshot(42.0, 0)),
+        }]);
+        state.apply(vec![AgentResult {
+            agent: info(),
+            result: Err(FetchError::Other(anyhow::anyhow!("temporary"))),
+        }]);
         let pane = &state.panes()[0];
         assert_eq!(pane.snapshot.as_ref().unwrap().limits[0].used_percent, 42.0);
         assert_eq!(pane.error.as_deref(), Some("temporary"));
@@ -167,24 +264,20 @@ mod tests {
     }
 
     #[test]
-    fn samples_are_keyed_by_stable_limit_id() {
+    fn samples_use_snapshot_origin_and_stable_limit_id() {
         let mut state = WatchState::new(vec![info()]);
-        state.apply(
-            vec![AgentResult {
-                agent: info(),
-                result: Ok(snapshot(40.0)),
-            }],
-            at(0),
-        );
-        state.apply(
-            vec![AgentResult {
-                agent: info(),
-                result: Ok(snapshot(55.0)),
-            }],
-            at(1),
-        );
-
-        let id = LimitId::new("session:all");
-        assert_eq!(state.panes()[0].samples(&id).len(), 2);
+        state.apply(vec![AgentResult {
+            agent: info(),
+            result: Ok(snapshot(40.0, 0)),
+        }]);
+        state.apply(vec![AgentResult {
+            agent: info(),
+            result: Ok(snapshot(55.0, 1)),
+        }]);
+        let pane = &state.panes()[0];
+        let window = pane.snapshot.as_ref().unwrap().limits[0].window();
+        let points = pane.samples(&LimitId::new("session:all"), window);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].minute, at(0).timestamp() / 60);
     }
 }

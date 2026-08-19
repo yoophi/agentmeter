@@ -5,6 +5,7 @@
 - **`agentmeter`** — 설정한 에이전트들을 한 화면에 나란히
 - **`ccmeter`** — Claude Code 만
 - **`codexmeter`** — Codex 만
+
 각 도구의 `/usage`·`/status` 가 보여주는 것과 같은 값 — 한도 소진율과 리셋 시각 — 을
 터미널에서 바로 확인하거나 상주시켜 둘 수 있습니다.
 
@@ -85,9 +86,11 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 ```
 
 `codexmeter` 도 옵션이 완전히 같습니다.
-상주 모드에서 `r` 은 즉시 새로고침, `q` 는 종료입니다.
+상주 모드에서 `r`은 캐시 우선 즉시 새로고침, `R`은 Claude 캐시와 백오프를
+건너뛴 HTTP 직접 조회, `q`는 종료입니다. 직접 조회가 실패하면 직전 값과 실제 오류를
+함께 표시합니다.
 
-상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 한 줄 차트로 보여줍니다.
+상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 3행 Sparkline으로 보여줍니다.
 
 ```
  › Current session  +3%p
@@ -98,8 +101,9 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 ```
 
 가로축은 창 전체(세션 5시간 / 주간 7일)라 바로 위 시간 게이지와 축이 같고,
-앱을 켜기 전 구간은 `·` 로 비어 있습니다. 제목 옆 `+3%p` 는 켠 뒤로 늘어난 양입니다.
-기록은 메모리에만 남으므로 1회 실행에는 차트가 나오지 않습니다.
+수집하지 않은 구간은 `·` placeholder로 비어 있습니다. 제목 옆 `+3%p`는 현재 창의
+첫 표본 이후 늘어난 양입니다. 실측 표본은 `~/.cache/agentmeter/history/` 아래의
+공급자·창별 JSON에 저장되며, 재실행해도 같은 5시간/7일 창의 기록을 복원합니다.
 
 출력이 터미널이 아니면(파이프, `watch` 아래) 자동으로 1회 출력으로 내려갑니다.
 전체 화면 TUI 는 alternate screen 을 쓰기 때문에 `watch` 안에서는 동작할 수 없습니다.
@@ -108,9 +112,10 @@ watch -n 60 ccmeter        # watch 와 함께 써도 됩니다
 
 ### ccmeter
 
-**로컬 캐시를 먼저 읽습니다.** Claude Code 는 `/api/oauth/usage` 응답을 통째로
-`~/.claude/token-scope-oauth-usage.json` 에 저장해 두는데, 그 파일을 읽으면
-네트워크 호출이 없어 즉시 응답하고 `HTTP 429` 도 없습니다.
+**로컬 캐시를 먼저 읽습니다.** Claude Code의
+`~/.claude/token-scope-oauth-usage.json`과 마지막 직접 조회 성공 값을 보존한
+`~/.cache/agentmeter/claude-usage.json` 중 최신 값을 사용합니다. 네트워크 호출이
+없어 즉시 응답하고 `HTTP 429`도 없습니다.
 
 캐시가 15분보다 오래됐을 때만 `GET /api/oauth/usage` 를 직접 호출합니다.
 조회에 실패하면 5분간 다시 시도하지 않고, 그동안은 캐시 값에 `갱신 실패` 를 붙여
@@ -201,7 +206,7 @@ flowchart LR
 | `src/domain/` | `UsageLimit`, `UsageSnapshot`, `Origin`, 시간 창과 순수 규칙 | provider 응답 타입, I/O, CLI, 화면 문구·색상 |
 | `src/application/` | 공급자 검증·병렬 조회, 설정, watch 상태, outbound port | Clap, ratatui, HTTP·파일 구현 |
 | `src/adapters/inbound/` | CLI 문법, 실행 모드, application 호출 | provider 내부 구현, 인증·캐시 세부사항 |
-| `src/adapters/outbound/` | 외부 응답 파싱, domain 정규화, port 구현 | `Meter`, 게이지·각주 같은 화면 표현 |
+| `src/adapters/outbound/` | 외부 응답 파싱, domain 정규화, 설정·히스토리 port 구현 | `Meter`, 게이지·각주 같은 화면 표현 |
 | `src/adapters/presentation/` | domain snapshot을 `Meter`로 투영하고 plain·TUI·JSON 출력 | 네트워크, 인증, 설정 파일 저장 |
 | `src/bootstrap.rs` | 구체 adapter를 port에 연결 | 비즈니스 규칙과 출력 formatting |
 | `src/bin/` | 공개 실행 함수 호출 | application 조립과 실행 workflow |
@@ -244,7 +249,7 @@ domain, port, adapter, composition root는 crate-private로 유지합니다. 자
 
 ### Interface와 seam
 
-- `UsageSource`와 `SettingsRepository`가 외부 기술을 교체하는 outbound port입니다.
+- `UsageSource`, `SettingsRepository`, `HistoryRepository`가 외부 기술을 교체하는 outbound port입니다.
 - port에는 application이 필요한 의미만 노출합니다. concrete client, repository, 실행 capability를
   결과 타입에 싣지 않습니다.
 - module의 interface는 작게 유지하고 검증·선택·동시성·fallback 같은 복잡성은 implementation

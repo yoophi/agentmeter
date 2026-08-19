@@ -6,7 +6,7 @@
 //! 이미 정규화해 둔 `limits` 배열에서만 읽는다.
 
 use chrono::{DateTime, Local};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::usage::{Severity, UsageLimit};
 
@@ -16,13 +16,13 @@ const SESSION_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(5);
 /// 주간 한도 창 길이 (`seven_day`).
 const WEEK_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(7);
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageResponse {
     #[serde(default)]
     pub limits: Vec<Limit>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Limit {
     /// `session` | `weekly_all` | `weekly_scoped` | (그 외 미래 값)
     pub kind: String,
@@ -41,13 +41,13 @@ pub struct Limit {
     pub is_active: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scope {
     #[serde(default)]
     pub model: Option<ScopeModel>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeModel {
     #[serde(default)]
     pub display_name: Option<String>,
@@ -96,6 +96,10 @@ fn window_for(kind: &str) -> Option<chrono::TimeDelta> {
 
 /// 서버가 준 한도를 공급자·화면에 독립적인 도메인 값으로 옮긴다.
 pub fn to_limits(limits: &[Limit]) -> Vec<UsageLimit> {
+    let weekly_reset = limits
+        .iter()
+        .filter(|limit| limit.kind.starts_with("weekly"))
+        .find_map(Limit::resets_at_local);
     limits
         .iter()
         .map(|l| {
@@ -108,8 +112,36 @@ pub fn to_limits(limits: &[Limit]) -> Vec<UsageLimit> {
                 Some(l.severity()),
                 l.is_active,
                 window_for(&l.kind),
-                l.resets_at_local(),
+                l.resets_at_local().or_else(|| {
+                    if l.kind.starts_with("weekly") {
+                        weekly_reset
+                    } else {
+                        None
+                    }
+                }),
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_weekly_limit_inherits_the_group_reset() {
+        let response: UsageResponse = serde_json::from_str(
+            r#"{"limits":[
+                {"kind":"weekly_all","percent":1,
+                 "resets_at":"2026-08-25T16:00:00Z"},
+                {"kind":"weekly_scoped","percent":0,"resets_at":null,
+                 "scope":{"model":{"display_name":"Fable"}}}
+            ]}"#,
+        )
+        .unwrap();
+
+        let limits = to_limits(&response.limits);
+        assert_eq!(limits[0].window(), limits[1].window());
+        assert_eq!(limits[1].scope.as_deref(), Some("Fable"));
+    }
 }

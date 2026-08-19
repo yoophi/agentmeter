@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use chrono::{DateTime, Local};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::api;
 use super::model::{UsageResponse, to_limits};
@@ -21,6 +21,7 @@ pub const MAX_AGE: Duration = Duration::from_secs(15 * 60);
 pub const NEG_TTL: Duration = Duration::from_secs(5 * 60);
 
 const CACHE_REL: &str = ".claude/token-scope-oauth-usage.json";
+const AGENT_CACHE_REL: &str = ".cache/agentmeter/claude-usage.json";
 const FAIL_MARKER_REL: &str = ".cache/agentmeter/claude-usage.err";
 
 #[derive(Debug, Deserialize)]
@@ -29,12 +30,19 @@ struct CacheFile {
     usage: UsageResponse,
 }
 
+#[derive(Serialize)]
+struct CacheFileRef<'a> {
+    captured_at: String,
+    usage: &'a UsageResponse,
+}
+
 trait UsageClient: Send + Sync {
     fn fetch(&self) -> Result<UsageResponse, FetchError>;
 }
 
 trait CacheStore: Send + Sync {
     fn read(&self) -> Option<(DateTime<Local>, UsageResponse)>;
+    fn write(&self, at: DateTime<Local>, response: &UsageResponse) -> anyhow::Result<()>;
     fn backoff_active(&self, now: SystemTime) -> bool;
     fn mark_failure(&self);
     fn clear_backoff(&self);
@@ -57,7 +65,16 @@ struct FileCacheStore;
 
 impl CacheStore for FileCacheStore {
     fn read(&self) -> Option<(DateTime<Local>, UsageResponse)> {
-        parse_cache(&std::fs::read_to_string(home_path(CACHE_REL)?).ok()?).ok()
+        [CACHE_REL, AGENT_CACHE_REL]
+            .into_iter()
+            .filter_map(home_path)
+            .filter_map(|path| read_cache_at(&path))
+            .max_by_key(|(at, _)| *at)
+    }
+
+    fn write(&self, at: DateTime<Local>, response: &UsageResponse) -> anyhow::Result<()> {
+        let path = home_path(AGENT_CACHE_REL).context("HOME 을 찾을 수 없습니다")?;
+        write_cache_at(&path, at, response)
     }
 
     fn backoff_active(&self, now: SystemTime) -> bool {
@@ -159,10 +176,13 @@ impl ClaudeUsageSource {
     fn fetch_live(&self) -> Result<UsageSnapshot, FetchError> {
         match self.client.fetch() {
             Ok(response) => {
+                let captured_at = self.clock.local_now();
+                // Claude Code 자체 캐시가 갱신되지 않아도 방금 실측한 값은 보존한다.
+                let _ = self.cache.write(captured_at, &response);
                 self.cache.clear_backoff();
                 Ok(UsageSnapshot::live(
                     to_limits(&response.limits),
-                    self.clock.local_now(),
+                    captured_at,
                 ))
             }
             Err(error) => {
@@ -213,6 +233,28 @@ fn parse_cache(raw: &str) -> anyhow::Result<(DateTime<Local>, UsageResponse)> {
         .context("captured_at 을 읽을 수 없습니다")?
         .with_timezone(&Local);
     Ok((captured_at, file.usage))
+}
+
+fn read_cache_at(path: &std::path::Path) -> Option<(DateTime<Local>, UsageResponse)> {
+    parse_cache(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_cache_at(
+    path: &std::path::Path,
+    at: DateTime<Local>,
+    response: &UsageResponse,
+) -> anyhow::Result<()> {
+    let parent = path.parent().context("캐시 디렉터리를 찾을 수 없습니다")?;
+    std::fs::create_dir_all(parent).context("캐시 디렉터리를 만들지 못했습니다")?;
+    let bytes = serde_json::to_vec(&CacheFileRef {
+        captured_at: at.to_rfc3339(),
+        usage: response,
+    })
+    .context("usage 캐시 직렬화 실패")?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, bytes).context("usage 임시 캐시 저장 실패")?;
+    std::fs::rename(&temporary, path).context("usage 캐시 교체 실패")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -275,6 +317,11 @@ mod tests {
     impl CacheStore for FakeCache {
         fn read(&self) -> Option<(DateTime<Local>, UsageResponse)> {
             self.cached.lock().unwrap().clone()
+        }
+
+        fn write(&self, at: DateTime<Local>, response: &UsageResponse) -> anyhow::Result<()> {
+            *self.cached.lock().unwrap() = Some((at, response.clone()));
+            Ok(())
         }
 
         fn backoff_active(&self, _now: SystemTime) -> bool {
@@ -406,5 +453,20 @@ mod tests {
     fn broken_cache_is_ignored() {
         assert!(parse_cache("{}").is_err());
         assert!(parse_cache(r#"{"captured_at":"nope","usage":{"limits":[]}}"#).is_err());
+    }
+
+    #[test]
+    fn live_response_round_trips_through_agent_cache() {
+        let at = at(12, 33);
+        let path = std::env::temp_dir().join(format!(
+            "agentmeter-claude-cache-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        write_cache_at(&path, at, &response()).unwrap();
+        let (loaded_at, loaded) = read_cache_at(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(loaded_at, at);
+        assert_eq!(loaded.limits.len(), 2);
     }
 }

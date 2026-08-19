@@ -2,13 +2,16 @@
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use super::cli::{self, Cli};
 use crate::adapters::presentation::{self, plain};
-use crate::application::{AgentResult, FetchError, FetchPolicy, UsageApplication};
+use crate::application::{
+    AgentResult, FetchError, FetchPolicy, HistoryRepository, UsageApplication,
+};
 use crate::bootstrap::{self, Runtime};
 use crate::domain::usage::UsageSnapshot;
 use crate::local_timezone;
@@ -59,7 +62,13 @@ pub(crate) fn main_agentmeter() -> ExitCode {
             Err(error) => report_error(MULTI_PROG, error),
         },
         None => match runtime.settings.load() {
-            Ok(settings) => finish(MULTI_PROG, &root.view, runtime.usage, settings.agents),
+            Ok(settings) => finish(
+                MULTI_PROG,
+                &root.view,
+                runtime.usage,
+                runtime.history,
+                settings.agents,
+            ),
             Err(error) => report_error(MULTI_PROG, error),
         },
     }
@@ -79,6 +88,7 @@ pub(crate) fn main_single(
         prog,
         &arguments,
         runtime.usage,
+        runtime.history,
         vec![agent_name.to_string()],
     )
 }
@@ -87,9 +97,10 @@ fn finish(
     prog: &'static str,
     arguments: &Cli,
     application: UsageApplication,
+    history: Arc<dyn HistoryRepository>,
     names: Vec<String>,
 ) -> ExitCode {
-    match run(prog, arguments, application, names) {
+    match run(prog, arguments, application, history, names) {
         Ok(code) => code,
         Err(error) => report_error(prog, error),
     }
@@ -104,6 +115,7 @@ fn run(
     prog: &'static str,
     arguments: &Cli,
     application: UsageApplication,
+    history: Arc<dyn HistoryRepository>,
     names: Vec<String>,
 ) -> Result<ExitCode> {
     // 이름 검증은 조회 전 애플리케이션 경계에서 한 번 수행한다.
@@ -131,6 +143,7 @@ fn run(
                 arguments.interval_secs(),
                 timezone,
                 application,
+                history,
                 names,
                 arguments.live,
             )?;

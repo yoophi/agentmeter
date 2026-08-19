@@ -1,8 +1,10 @@
 //! 애플리케이션이 외부 세계에 요구하는 포트.
 
-use crate::domain::usage::UsageSnapshot;
+use std::collections::BTreeMap;
 
-use super::{FetchError, Settings};
+use crate::domain::usage::{LimitId, UsageSnapshot, UsageWindow};
+
+use super::{FetchError, Settings, UsageSample};
 
 /// 한 번의 사용량 조회 조건.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,4 +24,20 @@ pub trait UsageSource: Send + Sync {
 pub trait SettingsRepository: Send + Sync {
     fn load(&self) -> anyhow::Result<Option<Settings>>;
     fn save(&self, settings: &Settings) -> anyhow::Result<()>;
+}
+
+/// 한도 창별 표본을 파일 같은 외부 저장소에 보존하는 포트.
+pub trait HistoryRepository: Send + Sync {
+    fn load(
+        &self,
+        provider: &str,
+        window: UsageWindow,
+    ) -> anyhow::Result<BTreeMap<LimitId, Vec<UsageSample>>>;
+
+    fn save(
+        &self,
+        provider: &str,
+        window: UsageWindow,
+        series: &BTreeMap<LimitId, Vec<UsageSample>>,
+    ) -> anyhow::Result<()>;
 }

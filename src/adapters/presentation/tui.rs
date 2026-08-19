@@ -1,5 +1,6 @@
 //! 상주 모드 TUI. 조회 상태는 애플리케이션 계층이, 화면 투영은 이 모듈이 맡는다.
 
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,10 +11,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Gauge, Paragraph};
+use ratatui::widgets::{Gauge, Paragraph, Sparkline};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::application::{AgentResult, FetchPolicy, UsageApplication, WatchPane, WatchState};
+use crate::application::{
+    AgentResult, FetchPolicy, HistoryRepository, UsageApplication, WatchPane, WatchState,
+};
 use crate::domain::usage::Severity;
 
 use super::history;
@@ -23,10 +26,11 @@ const TICK: Duration = Duration::from_secs(1);
 const GAUGE_INDENT: u16 = 3;
 const PANE_GAP: u16 = 2;
 const RIGHT_MARGIN: u16 = 2;
+const HISTORY_CHART_HEIGHT: usize = 3;
 
 fn rows_for(meter: &Meter, has_chart: bool) -> usize {
     2 + usize::from(meter.time.is_some())
-        + usize::from(has_chart)
+        + if has_chart { HISTORY_CHART_HEIGHT } else { 0 }
         + usize::from(meter.footnote.is_some())
         + 1
 }
@@ -57,12 +61,13 @@ pub(crate) fn run(
     interval_secs: u64,
     timezone: String,
     application: UsageApplication,
+    history: Arc<dyn HistoryRepository>,
     names: Vec<String>,
     live: bool,
 ) -> Result<()> {
     let interval = Duration::from_secs(interval_secs);
     let (tx, rx) = mpsc::channel::<Round>();
-    let (request_tx, request_rx) = mpsc::channel::<()>();
+    let (request_tx, request_rx) = mpsc::channel::<bool>();
     let agents = application.info(&names)?;
 
     spawn_worker(tx, request_rx, interval, application, names, live);
@@ -71,7 +76,7 @@ pub(crate) fn run(
         prog: prog.to_string(),
         timezone,
         label_panes: agents.len() > 1,
-        state: WatchState::new(agents),
+        state: WatchState::persistent(agents, history),
         next_fetch: None,
         interval,
     };
@@ -84,25 +89,23 @@ pub(crate) fn run(
 
 fn spawn_worker(
     tx: Sender<Round>,
-    request_rx: Receiver<()>,
+    request_rx: Receiver<bool>,
     interval: Duration,
     application: UsageApplication,
     names: Vec<String>,
     live: bool,
 ) {
     thread::spawn(move || {
+        let mut force_live = false;
         loop {
-            let policy = if live {
-                FetchPolicy::Fresh
-            } else {
-                FetchPolicy::PreferCached
-            };
+            let policy = fetch_policy(live, force_live);
             let results = application.query(&names, policy).unwrap_or_default();
             if tx.send(Round(results)).is_err() {
                 return;
             }
             match request_rx.recv_timeout(interval) {
-                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Ok(force) => force_live = force,
+                Err(RecvTimeoutError::Timeout) => force_live = false,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -113,11 +116,11 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     rx: &Receiver<Round>,
-    request_tx: &Sender<()>,
+    request_tx: &Sender<bool>,
 ) -> Result<()> {
     loop {
         while let Ok(round) = rx.try_recv() {
-            app.state.apply(round.0, Local::now());
+            app.state.apply(round.0);
             app.next_fetch = Some(Instant::now() + app.interval);
         }
 
@@ -132,12 +135,29 @@ fn event_loop(
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Ok(());
                 }
-                KeyCode::Char('r') => {
-                    let _ = request_tx.send(());
+                code => {
+                    if let Some(force_live) = refresh_request(code) {
+                        let _ = request_tx.send(force_live);
+                    }
                 }
-                _ => {}
             }
         }
+    }
+}
+
+fn fetch_policy(live: bool, force_live: bool) -> FetchPolicy {
+    if live || force_live {
+        FetchPolicy::Fresh
+    } else {
+        FetchPolicy::PreferCached
+    }
+}
+
+fn refresh_request(code: KeyCode) -> Option<bool> {
+    match code {
+        KeyCode::Char('r') => Some(false),
+        KeyCode::Char('R') => Some(true),
+        _ => None,
     }
 }
 
@@ -147,10 +167,11 @@ fn draw(frame: &mut Frame, app: &App) {
         width: full.width.saturating_sub(RIGHT_MARGIN),
         ..full
     };
+    let footer_height = if app.state.any_refresh_failed() { 2 } else { 1 };
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
     .areas(canvas);
 
@@ -187,11 +208,11 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn chart_of(pane: &WatchPane, meter: &Meter, area: Rect) -> Option<String> {
+fn chart_of(pane: &WatchPane, meter: &Meter, area: Rect) -> Option<Vec<Option<u64>>> {
     let width = area.width.saturating_sub(GAUGE_INDENT) as usize;
     meter
         .window
-        .and_then(|window| history::chart(pane.samples(&meter.id), window, width))
+        .and_then(|window| history::chart(pane.samples(&meter.id, Some(window)), window, width))
 }
 
 fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, app: &App) {
@@ -230,7 +251,7 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, app: &App) {
         return;
     }
 
-    let charts: Vec<Option<String>> = meters
+    let charts: Vec<Option<Vec<Option<u64>>>> = meters
         .iter()
         .map(|meter| chart_of(pane, meter, area))
         .collect();
@@ -248,7 +269,7 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, app: &App) {
 
     let mut base = 0;
     for ((meter, chart), size) in meters.iter().zip(&charts).zip(&sizes) {
-        let delta = history::delta(pane.samples(&meter.id));
+        let delta = history::delta(pane.samples(&meter.id, meter.window));
         draw_one(
             frame,
             &slots[base..base + size],
@@ -264,7 +285,7 @@ fn draw_one(
     frame: &mut Frame,
     slots: &[Rect],
     meter: &Meter,
-    chart: Option<&str>,
+    chart: Option<&[Option<u64>]>,
     delta: Option<&str>,
 ) {
     let marker = if meter.emphasized { "›" } else { " " };
@@ -293,14 +314,24 @@ fn draw_one(
     }
 
     if let Some(chart) = chart {
+        let first = slots[row];
+        let last = slots[row + HISTORY_CHART_HEIGHT - 1];
+        let chart_area = Rect {
+            x: first.x,
+            y: first.y,
+            width: first.width,
+            height: last.bottom().saturating_sub(first.y),
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                chart,
-                Style::default().fg(Color::Indexed(109)),
-            ))),
-            indent(slots[row], GAUGE_INDENT),
+            Sparkline::default()
+                .data(chart.iter().copied())
+                .max(100)
+                .style(Style::default().fg(Color::Indexed(109)))
+                .absent_value_style(Style::default().fg(Color::DarkGray))
+                .absent_value_symbol("·"),
+            indent(chart_area, GAUGE_INDENT),
         );
-        row += 1;
+        row += HISTORY_CHART_HEIGHT;
     }
 
     if let Some(note) = &meter.footnote {
@@ -330,18 +361,40 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(seconds) = app.seconds_until_refresh() {
         parts.push(format!("다음 {seconds}초"));
     }
-    if app.state.any_refresh_failed() {
-        parts.push("갱신 실패".to_string());
-    }
-    parts.push("[r] 새로고침  [q] 종료".to_string());
+    let controls = if app
+        .state
+        .panes()
+        .iter()
+        .any(|pane| pane.agent.name == "claude")
+    {
+        "[r] 새로고침  [R] HTTP 조회  [q] 종료"
+    } else {
+        "[r] 새로고침  [q] 종료"
+    };
+    parts.push(controls.to_string());
 
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {}", parts.join("  ·  ")),
-            Style::default().fg(Color::DarkGray),
-        ))),
-        area,
-    );
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" {}", parts.join("  ·  ")),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    let errors: Vec<String> = app
+        .state
+        .panes()
+        .iter()
+        .filter_map(|pane| {
+            pane.snapshot.as_ref()?;
+            pane.error
+                .as_ref()
+                .map(|error| format!("{}: {error}", pane.agent.display))
+        })
+        .collect();
+    if !errors.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" 갱신 실패: {}", errors.join(" · ")),
+            Style::default().fg(color_for(Severity::Critical)),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn indent(area: Rect, by: u16) -> Rect {
@@ -427,7 +480,7 @@ mod tests {
                     result: Ok(UsageSnapshot::live(limits(), Local::now())),
                 })
                 .collect();
-            state.apply(results, Local::now());
+            state.apply(results);
         }
         App {
             prog: "agentmeter".into(),
@@ -484,29 +537,24 @@ mod tests {
     #[test]
     fn error_is_visible_without_data() {
         let mut app = app_with(&["claude"], false);
-        app.state.apply(
-            vec![AgentResult {
-                agent: info("claude"),
-                result: Err(FetchError::Other(anyhow::anyhow!("재인증 필요"))),
-            }],
-            Local::now(),
-        );
+        app.state.apply(vec![AgentResult {
+            agent: info("claude"),
+            result: Err(FetchError::Other(anyhow::anyhow!("재인증 필요"))),
+        }]);
         assert!(render(&app, 60, 24).contains("재인증 필요"));
     }
 
     #[test]
     fn stale_data_and_refresh_failure_are_both_visible() {
         let mut app = app_with(&["claude"], true);
-        app.state.apply(
-            vec![AgentResult {
-                agent: info("claude"),
-                result: Err(FetchError::Other(anyhow::anyhow!("temporary"))),
-            }],
-            Local::now(),
-        );
+        app.state.apply(vec![AgentResult {
+            agent: info("claude"),
+            result: Err(FetchError::Other(anyhow::anyhow!("HTTP 429"))),
+        }]);
         let output = render(&app, 60, 24);
         assert!(output.contains("Current session"));
         assert!(output.contains("갱신 실패"));
+        assert!(output.contains("HTTP 429"));
     }
 
     #[test]
@@ -525,13 +573,10 @@ mod tests {
         let mut state = WatchState::new(infos.clone());
         for offset in [2, 1] {
             let at = Local::now() - TimeDelta::minutes(offset);
-            state.apply(
-                vec![AgentResult {
-                    agent: infos[0],
-                    result: Ok(UsageSnapshot::live(limits(), at)),
-                }],
-                at,
-            );
+            state.apply(vec![AgentResult {
+                agent: infos[0],
+                result: Ok(UsageSnapshot::live(limits(), at)),
+            }]);
         }
         let app = App {
             prog: "agentmeter".into(),
@@ -542,5 +587,18 @@ mod tests {
             interval: Duration::from_secs(60),
         };
         assert!(render(&app, 80, 30).contains('·'));
+    }
+
+    #[test]
+    fn refresh_keys_choose_cached_or_fresh_policy() {
+        assert_eq!(refresh_request(KeyCode::Char('r')), Some(false));
+        assert_eq!(refresh_request(KeyCode::Char('R')), Some(true));
+        assert_eq!(fetch_policy(false, false), FetchPolicy::PreferCached);
+        assert_eq!(fetch_policy(false, true), FetchPolicy::Fresh);
+    }
+
+    #[test]
+    fn claude_footer_advertises_http_refresh() {
+        assert!(render(&app_with(&["claude"], true), 100, 30).contains("[R] HTTP 조회"));
     }
 }

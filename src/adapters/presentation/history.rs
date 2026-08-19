@@ -1,14 +1,16 @@
-//! 애플리케이션이 보관한 표본을 텍스트 차트로 투영한다.
+//! 애플리케이션이 보관한 표본을 Sparkline 데이터로 투영한다.
 
 use crate::application::UsageSample;
 use crate::domain::usage::UsageWindow;
 
-const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-const EMPTY: char = '·';
 const MIN_POINTS: usize = 2;
 
-pub(crate) fn chart(points: &[UsageSample], window: UsageWindow, width: usize) -> Option<String> {
-    if points.len() < MIN_POINTS || width == 0 {
+pub(crate) fn chart(
+    points: &[UsageSample],
+    window: UsageWindow,
+    width: usize,
+) -> Option<Vec<Option<u64>>> {
+    if width == 0 {
         return None;
     }
     let start = window.started_at().timestamp() / 60;
@@ -16,19 +18,21 @@ pub(crate) fn chart(points: &[UsageSample], window: UsageWindow, width: usize) -
     if end <= start {
         return None;
     }
+    if points.len() < MIN_POINTS {
+        return Some(vec![None; width]);
+    }
 
     let span = (end - start) as f64;
-    let mut cells: Vec<Option<f64>> = vec![None; width];
+    let mut cells = vec![None; width];
     for point in points {
         let offset = (point.minute - start) as f64 / span;
         if !(0.0..1.0).contains(&offset) {
             continue;
         }
         let index = ((offset * width as f64) as usize).min(width - 1);
-        cells[index] = Some(point.percent);
+        cells[index] = Some(point.percent.clamp(0.0, 100.0).round() as u64);
     }
-
-    Some(cells.iter().map(|cell| cell.map_or(EMPTY, block)).collect())
+    Some(cells)
 }
 
 pub(crate) fn delta(points: &[UsageSample]) -> Option<String> {
@@ -40,12 +44,6 @@ pub(crate) fn delta(points: &[UsageSample]) -> Option<String> {
         return None;
     }
     Some(format!("{difference:+.0}%p"))
-}
-
-fn block(percent: f64) -> char {
-    let ratio = (percent / 100.0).clamp(0.0, 1.0);
-    let index = (ratio * (BLOCKS.len() - 1) as f64).round() as usize;
-    BLOCKS[index.min(BLOCKS.len() - 1)]
 }
 
 #[cfg(test)]
@@ -70,19 +68,16 @@ mod tests {
     }
 
     #[test]
-    fn chart_needs_two_points() {
-        assert!(chart(&[point(0, 10.0)], window(0, 60), 20).is_none());
-        assert!(chart(&[point(0, 10.0), point(1, 12.0)], window(1, 60), 20).is_some());
+    fn one_point_produces_an_empty_placeholder() {
+        let output = chart(&[point(0, 10.0)], window(0, 60), 20).unwrap();
+        assert_eq!(output, vec![None; 20]);
     }
 
     #[test]
     fn axis_spans_the_whole_window() {
         let points = [point(1000, 50.0), point(1001, 51.0), point(1002, 52.0)];
         let output = chart(&points, window(1002, 28), 20).unwrap();
-        assert!(
-            output.starts_with(&EMPTY.to_string().repeat(15)),
-            "{output}"
-        );
+        assert!(output[..15].iter().all(Option::is_none), "{output:?}");
     }
 
     #[test]
@@ -93,9 +88,15 @@ mod tests {
     }
 
     #[test]
-    fn block_height_is_absolute_and_clamped() {
-        assert_eq!(block(-5.0), '▁');
-        assert_eq!(block(50.0), '▅');
-        assert_eq!(block(150.0), '█');
+    fn height_is_absolute_and_clamped() {
+        let values = chart(
+            &[point(0, -5.0), point(1, 50.0), point(2, 150.0)],
+            window(2, 60),
+            300,
+        )
+        .unwrap();
+        assert!(values.contains(&Some(0)));
+        assert!(values.contains(&Some(50)));
+        assert!(values.contains(&Some(100)));
     }
 }

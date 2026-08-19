@@ -27,6 +27,7 @@ flowchart LR
 - `src/adapters/outbound/claude/` — Claude 캐시, 자격증명, HTTP 어댑터
 - `src/adapters/outbound/codex/` — Codex app-server JSONL 어댑터
 - `src/adapters/outbound/config.rs` — TOML 설정 저장소
+- `src/adapters/outbound/history.rs` — 한도 창별 JSON 히스토리 저장소
 - `src/adapters/presentation/` — 화면 모델 투영, plain·TUI·JSON 출력
 - `src/bootstrap.rs` — 구체 어댑터를 포트에 연결하는 유일한 composition root
 - `src/bin/` — 공개 실행 함수 하나만 호출하는 얇은 프로세스 진입점
@@ -90,7 +91,8 @@ TOML 파싱과 파일 위치는 `FileSettingsRepository`가, `agents=claude,code
 ### 상주 상태
 
 `WatchState`가 이전 성공 값 보존, 최근 오류, 분 단위 표본, 공급자별 상태를 관리합니다.
-TUI는 이 상태를 렌더링할 뿐 갱신 정책을 소유하지 않습니다.
+표본 저장은 `HistoryRepository` 포트를 통해 수행하고 파일명·JSON·HOME 경로는 아웃바운드
+어댑터가 맡습니다. TUI는 이 상태를 렌더링할 뿐 저장이나 갱신 정책을 소유하지 않습니다.
 
 ```mermaid
 stateDiagram-v2
@@ -104,8 +106,9 @@ stateDiagram-v2
 ```
 
 시계열은 화면 제목이 아니라 `LimitId`로 키를 잡습니다. 제목이나 번역이 바뀌어도 같은
-한도의 표본이 끊기지 않습니다. 애플리케이션은 수치 표본만 저장하고, 블록 문자와 `+3%p`
-문구는 presentation의 `history` 모듈이 만듭니다.
+한도의 표본이 끊기지 않습니다. 애플리케이션은 실제 측정 시각의 수치 표본만 저장하고,
+3행 Sparkline과 `+3%p` 문구는 presentation의 `history` 모듈이 만듭니다. 공급자·창 길이·
+시작·종료 시각이 포함된 유일한 파일을 사용하므로 재실행해도 같은 5시간/7일 창만 복원합니다.
 
 ## Claude 획득 정책의 내부 포트
 
@@ -145,7 +148,8 @@ flowchart TD
 ```
 
 TUI의 네트워크 조회는 워커 스레드가 수행합니다. 메인 스레드는 키 입력과 렌더링을 계속
-처리하므로 원격 타임아웃 중에도 `q`와 `r`에 반응합니다. 출력이 파이프나 `watch` 아래라면
+처리하므로 원격 타임아웃 중에도 `q`, `r`, `R`에 반응합니다. `r`은 캐시 우선,
+`R`은 강제 HTTP 조회 정책으로 전달됩니다. 출력이 파이프나 `watch` 아래라면
 alternate screen을 사용할 수 없으므로 자동으로 1회 plain 출력으로 내려갑니다.
 
 ## 새 공급자 추가
