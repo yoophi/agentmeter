@@ -3,6 +3,7 @@ name = "agentmeter"
 version = "2026.8.2"
 edition = "2024"
 description = "코딩 에이전트의 사용 한도를 같은 형식으로 보여주는 CLI"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
