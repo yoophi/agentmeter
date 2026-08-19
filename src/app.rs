@@ -1,4 +1,7 @@
-//! 두 도구가 공유하는 실행 로직 — 모드 분기, 출력, 종료 코드.
+//! 실행 로직 — 모드 분기, 출력, 종료 코드.
+//!
+//! 단일 에이전트 도구(`ccmeter`, `codexmeter`)와 통합 도구(`agentmeter`)가
+//! 같은 경로를 쓴다. 차이는 다룰 에이전트가 몇 개인지뿐이다.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
@@ -7,19 +10,34 @@ use anyhow::Result;
 
 use crate::cli::{self, Cli};
 use crate::meter::Snapshot;
+use crate::multi;
+use crate::registry::{self, AgentSpec};
 use crate::render::{self, plain};
 use crate::{FetchError, local_tz};
 
 /// 한 번 조회해 화면 표현을 만든다. 상주 모드에서는 워커 스레드가 반복 호출한다.
 pub type Fetch = Box<dyn Fn() -> Result<Snapshot, FetchError> + Send>;
 
-/// 조회기를 만든다. `tz` 는 각주 문구용이라 프로세스마다 한 번만 해석해 넘긴다.
-/// `live` 는 캐시를 건너뛸지 여부 (`--live`).
-pub type MakeFetch = fn(tz: String, live: bool) -> Fetch;
-
-pub fn main(prog: &'static str, about: &'static str, make_fetch: MakeFetch) -> ExitCode {
+/// 단일 에이전트 전용 진입점. `agent` 는 [`registry`] 의 이름이다.
+pub fn main_single(prog: &'static str, about: &'static str, agent: &'static str) -> ExitCode {
     let args = Cli::parse_for(prog, about);
-    match run(prog, &args, make_fetch) {
+    let specs = match registry::find(agent) {
+        Some(spec) => vec![spec],
+        None => {
+            eprintln!("{prog}: 등록되지 않은 에이전트입니다: {agent}");
+            return ExitCode::FAILURE;
+        }
+    };
+    finish(prog, &args, specs)
+}
+
+/// 설정에 적힌 에이전트를 모두 보여주는 진입점.
+pub fn main_multi(prog: &'static str, args: &Cli, agents: Vec<&'static AgentSpec>) -> ExitCode {
+    finish(prog, args, agents)
+}
+
+fn finish(prog: &'static str, args: &Cli, specs: Vec<&'static AgentSpec>) -> ExitCode {
+    match run(prog, args, specs) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{prog}: {e:#}");
@@ -28,16 +46,19 @@ pub fn main(prog: &'static str, about: &'static str, make_fetch: MakeFetch) -> E
     }
 }
 
-fn run(prog: &'static str, args: &Cli, make_fetch: MakeFetch) -> Result<ExitCode> {
+fn run(prog: &'static str, args: &Cli, specs: Vec<&'static AgentSpec>) -> Result<ExitCode> {
     let stdout_is_tty = std::io::stdout().is_terminal();
     // 시간대 해석은 OS 호출이라 프로세스당 한 번만 한다
     let tz = local_tz();
-    let fetch = make_fetch(tz.clone(), args.live);
 
     if args.json {
-        let snap = fetch()?;
-        println!("{}", crate::render::to_json(&snap)?);
-        return Ok(ExitCode::SUCCESS);
+        let panes = fetch(&specs, &tz, args.live);
+        println!("{}", render::to_json_panes(&panes)?);
+        return Ok(if panes.iter().all(|p| p.result.is_ok()) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
     }
 
     // 상주 모드는 TTY 에서만 의미가 있다. ratatui 는 alternate screen 을 쓰므로
@@ -51,22 +72,41 @@ fn run(prog: &'static str, args: &Cli, make_fetch: MakeFetch) -> Result<ExitCode
                     cli::MIN_INTERVAL
                 );
             }
-            render::tui::run(prog, args.interval_secs(), tz, fetch)?;
+            render::tui::run(prog, args.interval_secs(), tz, specs, args.live)?;
             return Ok(ExitCode::SUCCESS);
         }
         eprintln!("{prog}: 출력이 터미널이 아니라 1회 출력합니다 (watch 와 함께 쓰세요)");
     }
 
-    once(prog, args, stdout_is_tty, fetch)
+    once(args, stdout_is_tty, &specs, &tz)
 }
 
-fn once(prog: &str, args: &Cli, is_tty: bool, fetch: Fetch) -> Result<ExitCode> {
+fn fetch(specs: &[&'static AgentSpec], tz: &str, live: bool) -> Vec<multi::Pane> {
+    let names: Vec<String> = specs.iter().map(|s| s.name.to_string()).collect();
+    multi::fetch_all(&names, tz, live)
+}
+
+fn once(args: &Cli, is_tty: bool, specs: &[&'static AgentSpec], tz: &str) -> Result<ExitCode> {
     let color = render::use_color(args.no_color, is_tty);
     let width = terminal_width();
+    let panes = fetch(specs, tz, args.live);
 
-    let (text, ok) = once_output(prog, color, width, fetch());
+    // 에이전트가 하나면 머리글이 군더더기다 — 기존 단일 도구 화면을 그대로 유지한다.
+    let (text, ok) = if let [pane] = &panes[..] {
+        once_output(pane.agent.binary, color, width, &pane.result)
+    } else {
+        (
+            plain::render_panes(&panes, color, width),
+            panes.iter().all(|p| p.result.is_ok()),
+        )
+    };
+
     write!(std::io::stdout().lock(), "{text}")?;
-    Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// 1회 출력의 본문과 성공 여부.
@@ -77,10 +117,10 @@ fn once_output(
     prog: &str,
     color: bool,
     width: usize,
-    result: Result<Snapshot, FetchError>,
+    result: &Result<Snapshot, FetchError>,
 ) -> (String, bool) {
     match result {
-        Ok(snap) => (plain::render(&snap, color, width), true),
+        Ok(snap) => (plain::render(snap, color, width), true),
         Err(e) => (plain::render_error(prog, &e.to_string(), color), false),
     }
 }
@@ -113,7 +153,7 @@ mod tests {
 
     #[test]
     fn success_renders_the_meters() {
-        let (text, ok) = once_output("ccmeter", false, 80, Ok(one()));
+        let (text, ok) = once_output("ccmeter", false, 80, &Ok(one()));
         assert!(ok);
         assert!(text.contains("Current session"));
         assert!(text.contains("50% used"));
@@ -129,7 +169,7 @@ mod tests {
         ];
         for err in cases {
             let expect = err.to_string();
-            let (text, ok) = once_output("ccmeter", false, 80, Err(err));
+            let (text, ok) = once_output("ccmeter", false, 80, &Err(err));
             assert!(!ok, "실패는 실패 코드여야 함");
             assert!(text.contains(&expect), "본문에 사유가 있어야 함: {text}");
             assert!(text.starts_with("ccmeter:"), "프로그램 이름으로 시작: {text}");

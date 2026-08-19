@@ -8,6 +8,9 @@
 src/
   meter.rs        공통 화면 표현 + 문구 생성 + 창 진행률 계산
   history.rs      실행 후 모은 사용률 변화 + 텍스트 차트
+  config.rs       설정 파일 읽기·쓰기
+  registry.rs     이름 → 에이전트 표 (설정과 agentmeter 가 이것만 본다)
+  multi.rs        여러 에이전트 동시 조회
   app.rs          실행 모드 분기
   cli.rs          공통 옵션
   render/
@@ -24,6 +27,7 @@ src/
     source.rs     조회 진입점 (캐시 없음)
     model.rs      응답 → Meter
   bin/
+    agentmeter.rs 통합 진입점 + config 명령
     ccmeter.rs    진입점
     codexmeter.rs 진입점
 ```
@@ -97,6 +101,21 @@ Codex 의 `/status` 는 남은 비율(`71% left`)로 표시하고 Claude 의 `/u
   창 길이(분)로 `Current session` / `Current day` / `Current week` / `Current month` 를 고릅니다.
 - `time_left_label(remaining, with_days)` → `2 day 3 hour 15 minutes left`
   단위를 단수로 고정합니다. 자릿수가 일정해야 여러 줄이 세로로 맞습니다.
+
+## 구획(pane)
+
+화면은 에이전트마다 하나의 구획으로 **좌우로** 나뉩니다 (`A | B`, tmux 의 수직 분할).
+단일 에이전트 도구는 구획이 하나인 특수한 경우이므로 **코드 경로가 하나**입니다.
+
+폭은 균등하게 줍니다 — 어느 에이전트가 더 넓어야 할 이유가 없고, 균등하면
+게이지 길이가 같아 서로 비교하기 쉽습니다.
+
+1회 출력(`plain`)은 터미널이 100칸 미만이면 세로로 쌓습니다. 좁은 화면에서
+폭 40짜리 게이지 두 개는 읽기 어렵습니다. 상주 모드는 항상 좌우로 나눕니다.
+
+조회는 [`multi::fetch_all`] 이 스레드로 **동시에** 합니다. 순차로 하면 가장 느린
+에이전트가 전체 대기 시간을 결정합니다 (Codex 는 app-server 기동에 ~1초 걸립니다).
+하나가 실패해도 그 구획에만 사유를 적고 나머지는 정상으로 보여줍니다.
 
 ## 실행 모드
 
@@ -205,7 +224,9 @@ ccmeter 는 로컬 캐시를 읽을 수 있어서, 화면의 숫자가 방금 �
 
 1. `src/<이름>/` 에 클라이언트와 응답 모델을 넣고 `to_meters()` 를,
    그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 만듭니다.
-2. `src/bin/<이름>meter.rs` 에 진입점을 둡니다.
+2. `registry.rs` 의 표에 한 줄 등록합니다. 설정 파일(`agents = [...]`)과
+   `agentmeter` 는 이 표만 보므로 다른 곳은 손댈 필요가 없습니다.
+3. 전용 바이너리를 원하면 `src/bin/<이름>meter.rs` 에 진입점을 둡니다.
 
 ```rust
 fn main() -> ExitCode {

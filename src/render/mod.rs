@@ -24,6 +24,26 @@ pub const MUTED: &str = "\x1b[38;5;245m";
 pub const BOLD: &str = "\x1b[1m";
 pub const RESET: &str = "\x1b[0m";
 
+/// 여러 에이전트를 담은 `--json` 출력.
+/// 에이전트가 하나면 기존 형태를 그대로 유지해 스크립트가 깨지지 않게 한다.
+pub fn to_json_panes(panes: &[crate::multi::Pane]) -> anyhow::Result<String> {
+    if let [pane] = panes {
+        return match &pane.result {
+            Ok(snap) => to_json(snap),
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+        };
+    }
+    let mut out = serde_json::Map::new();
+    for pane in panes {
+        let value = match &pane.result {
+            Ok(snap) => serde_json::from_str(&to_json(snap)?)?,
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        };
+        out.insert(pane.agent.name.to_string(), value);
+    }
+    Ok(serde_json::to_string_pretty(&out)?)
+}
+
 fn pct(fill: f64) -> f64 {
     (fill * 1000.0).round() / 10.0
 }

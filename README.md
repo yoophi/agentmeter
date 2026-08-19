@@ -1,7 +1,10 @@
 # agentmeter
 
 코딩 에이전트의 사용 한도를 같은 형식으로 보여주는 CLI 모음입니다.
-현재 두 개의 도구를 제공합니다 — Claude Code 용 **`ccmeter`**, Codex 용 **`codexmeter`**.
+
+- **`agentmeter`** — 설정한 에이전트들을 한 화면에 나란히
+- **`ccmeter`** — Claude Code 만
+- **`codexmeter`** — Codex 만
 각 도구의 `/usage`·`/status` 가 보여주는 것과 같은 값 — 한도 소진율과 리셋 시각 — 을
 터미널에서 바로 확인하거나 상주시켜 둘 수 있습니다.
 
@@ -42,6 +45,35 @@ Codex 의 `/status` 는 남은 비율(`71% left`)로 표시하지만, 여기서�
 방금 조회한 값인지 몇 분 전 값인지 구분되어야 합니다.
 
 ## 사용법
+
+### agentmeter — 여러 에이전트를 한 화면에
+
+```bash
+agentmeter                              # 설정한 에이전트를 모두 조회
+agentmeter -w                           # 상주 모드 (좌우 분할)
+agentmeter --json                        # 에이전트별 키를 가진 JSON
+
+agentmeter config list                   # 설정 보기
+agentmeter config get agents             # 값 하나 보기
+agentmeter config set agents=claude,codex   # 표시할 에이전트 지정
+```
+
+구획은 **좌우로** 놓입니다 (`A | B`). 터미널이 좁으면(100칸 미만) 1회 출력에서는
+세로로 쌓습니다 — 폭 40짜리 게이지 두 개보다 폭 80짜리 하나가 읽기 쉽습니다.
+
+에이전트 하나가 실패해도 나머지는 그대로 보여주고, 조회는 **동시에** 합니다.
+
+설정은 `~/.config/agentmeter/config.toml` 에 저장됩니다
+(`XDG_CONFIG_HOME` 을 존중합니다).
+
+```toml
+agents = ["claude", "codex"]
+```
+
+순서가 화면 순서입니다. 파일이 없으면 등록된 에이전트를 모두 보여줍니다.
+모르는 이름을 넣으면 **저장하기 전에** 거절합니다.
+
+### ccmeter / codexmeter — 한 에이전트만
 
 ```bash
 ccmeter                    # 한 번 출력하고 종료
@@ -153,6 +185,9 @@ src/
   app.rs          모드 분기와 실행 로직
   cli.rs          공통 옵션
   history.rs      실행 후 사용률 변화와 텍스트 차트 (상주 모드)
+  config.rs       설정 파일 (표시할 에이전트)
+  registry.rs     이름 → 에이전트 표
+  multi.rs        여러 에이전트 동시 조회
   render/         plain(stdout) · tui(ratatui) 렌더러 · JSON 출력
   claude/         api(HTTP) · auth(Keychain) · source(캐시 우선) · model
   codex/          client(app-server) · source · model
@@ -161,8 +196,9 @@ src/
 
 각 도구는 자기 응답을 `Meter` 로 옮기기만 하고, 게이지·TUI·CLI 는 전부 공유합니다.
 새 에이전트를 추가하려면 `src/<이름>/` 에 클라이언트와 `to_meters()`,
-그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 넣고
-`src/bin/` 에 진입점 한 파일을 두면 됩니다.
+그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 만든 뒤
+`registry.rs` 에 한 줄 등록하면 됩니다. 그러면 설정 파일과 `agentmeter` 가
+바로 알아봅니다. 전용 바이너리를 따로 두고 싶으면 `src/bin/` 에 진입점을 추가합니다.
 자세한 것은 [docs/architecture.md](docs/architecture.md) 를 보세요.
 
 ## 설치
