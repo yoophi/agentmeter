@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::auth::{self, Credentials};
 use super::model::UsageResponse;
-use crate::FetchError;
+use crate::application::FetchError;
 
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
@@ -81,7 +81,9 @@ fn status_error(status: u16, retry_after: Option<u64>) -> FetchError {
     match status {
         401 | 403 => FetchError::Unauthorized(auth::reauth_hint().to_string()),
         429 => FetchError::Other(match retry_after {
-            Some(secs) => anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). {secs}초 후 다시 시도하세요"),
+            Some(secs) => {
+                anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). {secs}초 후 다시 시도하세요")
+            }
             None => anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). 잠시 후 다시 시도하세요"),
         }),
         other => FetchError::Other(anyhow::anyhow!("서버가 HTTP {other} 를 반환했습니다")),
@@ -99,7 +101,7 @@ fn parse_body(body: &str) -> Result<UsageResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meter::Level;
+    use crate::domain::usage::{LimitId, Severity};
 
     /// 실제 응답에서 발췌 — 최상위의 코드네임 필드들이 섞여 있어도
     /// limits 만 읽어서 동작해야 한다.
@@ -122,9 +124,16 @@ mod tests {
     fn parses_real_response() {
         let limits = parse_body(SAMPLE).unwrap().limits;
         assert_eq!(limits.len(), 3);
-        assert_eq!(limits[0].title(), "Current session");
-        assert_eq!(limits[1].title(), "Current week (all models)");
-        assert_eq!(limits[2].title(), "Current week (Fable)");
+        let normalized = super::super::model::to_limits(&limits);
+        assert_eq!(
+            normalized[0].window_duration,
+            Some(chrono::TimeDelta::hours(5))
+        );
+        assert_eq!(
+            normalized[1].window_duration,
+            Some(chrono::TimeDelta::days(7))
+        );
+        assert_eq!(normalized[2].scope.as_deref(), Some("Fable"));
         assert!(limits[2].is_active);
         assert_eq!(limits[2].percent, 73.0);
     }
@@ -135,8 +144,9 @@ mod tests {
         let body = r#"{"limits":[{"kind":"monthly_burst","percent":12,
             "scope":{"model":{"display_name":"Opus"}}}]}"#;
         let limits = parse_body(body).unwrap().limits;
-        assert_eq!(limits[0].title(), "monthly burst (Opus)");
-        assert_eq!(limits[0].level(), Level::Normal);
+        let normalized = super::super::model::to_limits(&limits);
+        assert_eq!(normalized[0].id, LimitId::new("monthly_burst:Opus"));
+        assert_eq!(normalized[0].severity, Severity::Normal);
     }
 
     /// severity 를 모를 때는 percent 로 보수적으로 판단한다.
@@ -144,7 +154,7 @@ mod tests {
     fn unknown_severity_falls_back_to_percent() {
         let body = r#"{"limits":[{"kind":"session","percent":93,"severity":"spicy"}]}"#;
         let limits = parse_body(body).unwrap().limits;
-        assert_eq!(limits[0].level(), Level::Critical);
+        assert_eq!(limits[0].severity(), Severity::Critical);
     }
 
     fn headers(pairs: &[(&str, &str)]) -> ureq::http::HeaderMap {
@@ -165,7 +175,10 @@ mod tests {
         assert_eq!(retry_after_secs(&headers(&[("retry-after", "0")])), None);
         assert_eq!(retry_after_secs(&headers(&[])), None);
         assert_eq!(retry_after_secs(&headers(&[("retry-after", "soon")])), None);
-        assert_eq!(retry_after_secs(&headers(&[("retry-after", "30")])), Some(30));
+        assert_eq!(
+            retry_after_secs(&headers(&[("retry-after", "30")])),
+            Some(30)
+        );
     }
 
     #[test]

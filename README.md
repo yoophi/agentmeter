@@ -173,38 +173,34 @@ ccmeter 가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본 경로
 
 ## 문서
 
-- [docs/architecture.md](docs/architecture.md) — 공통 구조, `Meter` 표현, 실행 모드
+- [docs/architecture.md](docs/architecture.md) — 계층 경계, 도메인·화면 모델, 실행 모드
+- [docs/architecture-review.html](docs/architecture-review.html) — 헥사고날 아키텍처 전체 리뷰
 - [docs/ccmeter.md](docs/ccmeter.md) — 캐시 우선 조회, 자격증명, 429 대응
 - [docs/codexmeter.md](docs/codexmeter.md) — app-server 프로토콜, 응답 처리
 
 ## 구조
 
-```
-src/
-  meter.rs        공통 화면 표현 (제목·게이지 두 줄·각주) + 문구·창 진행률 계산
-  app.rs          모드 분기와 실행 로직
-  cli.rs          공통 옵션
-  history.rs      실행 후 사용률 변화와 텍스트 차트 (상주 모드)
-  config.rs       설정 파일 (표시할 에이전트)
-  registry.rs     이름 → 에이전트 표
-  multi.rs        여러 에이전트 동시 조회
-  render/         plain(stdout) · tui(ratatui) 렌더러 · JSON 출력
-  claude/         api(HTTP) · auth(Keychain) · source(캐시 우선) · model
-  codex/          client(app-server) · source · model
-  bin/            ccmeter.rs · codexmeter.rs
-```
+헥사고날 아키텍처로 의존성을 안쪽으로만 향하게 했습니다.
 
-각 도구는 자기 응답을 `Meter` 로 옮기기만 하고, 게이지·TUI·CLI 는 전부 공유합니다.
-새 에이전트를 추가하려면 `src/<이름>/` 에 클라이언트와 `to_meters()`,
-그리고 `Snapshot` 을 돌려주는 `source::fetch(tz)` 를 만든 뒤
-`registry.rs` 에 한 줄 등록하면 됩니다. 그러면 설정 파일과 `agentmeter` 가
-바로 알아봅니다. 전용 바이너리를 따로 두고 싶으면 `src/bin/` 에 진입점을 추가합니다.
+- `src/domain/` — 공급자·표현과 무관한 `UsageLimit`, `UsageSnapshot`, 시간 창
+- `src/application/` — 병렬 조회·설정·상주 상태와 `UsageSource`, `SettingsRepository` 포트
+- `src/adapters/inbound/` — CLI 옵션과 실행 모드
+- `src/adapters/outbound/` — Claude/Codex 조회 및 TOML 설정 파일 어댑터
+- `src/adapters/presentation/` — plain/TUI/JSON 출력 어댑터
+- `src/bootstrap.rs` — 프로덕션 포트 구현을 조립하는 유일한 지점
+- `src/bin/` — `agentmeter`, `ccmeter`, `codexmeter` 프로세스 진입점
+
+각 도구는 자기 응답을 도메인 `UsageSnapshot` 으로 정규화하고, presentation 어댑터가
+이를 `Meter` 화면 모델로 투영합니다. 게이지·TUI·CLI 는 전부 공유합니다.
+새 에이전트를 추가하려면 `UsageSource` 포트를 구현하는 아웃바운드 어댑터를 만들고
+`bootstrap.rs` 에서 `RegisteredAgent` 로 조립합니다. 설정·병렬 조회·렌더링은 수정할 필요가 없습니다.
+전용 바이너리가 필요하면 `src/bin/` 에 진입점을 추가합니다.
 자세한 것은 [docs/architecture.md](docs/architecture.md) 를 보세요.
 
 ## 설치
 
 ```bash
-cargo install --path .   # ccmeter, codexmeter 두 개가 함께 설치됩니다
+cargo install --path .   # agentmeter, ccmeter, codexmeter가 함께 설치됩니다
 ```
 
 ## 빌드

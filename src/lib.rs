@@ -1,33 +1,33 @@
-pub mod app;
-pub mod claude;
-pub mod cli;
-pub mod config;
-pub mod history;
-pub mod codex;
-pub mod meter;
-pub mod multi;
-pub mod registry;
-pub mod render;
+//! Agentmeter 실행 진입점. 내부 헥사곤은 바이너리 API로 노출하지 않는다.
 
-/// 두 도구가 공유하는 조회 실패 표현.
-#[derive(Debug)]
-pub enum FetchError {
-    /// 재로그인이 필요한 상태. 상주 모드에서 종료시키지 않고 화면에 띄운다.
-    Unauthorized(String),
-    Other(anyhow::Error),
+mod adapters;
+mod application;
+mod bootstrap;
+mod domain;
+
+/// 통합 CLI를 실행한다.
+pub fn run_agentmeter() -> std::process::ExitCode {
+    adapters::inbound::runner::main_agentmeter()
 }
 
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FetchError::Unauthorized(m) => write!(f, "{m}"),
-            FetchError::Other(e) => write!(f, "{e:#}"),
-        }
-    }
+/// Claude Code 전용 CLI를 실행한다.
+pub fn run_ccmeter() -> std::process::ExitCode {
+    adapters::inbound::runner::main_single(
+        "ccmeter",
+        "Claude Code 사용 한도를 한눈에 보여줍니다",
+        "claude",
+    )
 }
 
-impl std::error::Error for FetchError {}
+/// Codex 전용 CLI를 실행한다.
+pub fn run_codexmeter() -> std::process::ExitCode {
+    adapters::inbound::runner::main_single(
+        "codexmeter",
+        "Codex 사용 한도를 한눈에 보여줍니다",
+        "codex",
+    )
+}
 
-pub fn local_tz() -> String {
+fn local_timezone() -> String {
     iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string())
 }

@@ -3,8 +3,10 @@
 //! ratatui 는 alternate screen + raw mode 를 쓰기 때문에 `watch` 아래에서는
 //! 동작하지 않는다. stdout 이 TTY 가 아니면 항상 이쪽으로 온다.
 
-use crate::meter::{Bar, Level, Meter, Snapshot};
-use crate::render::{BOLD, DIM, MUTED, RESET, ansi_for};
+use super::model::{self, Bar, Meter};
+use super::{BOLD, DIM, MUTED, RESET, ansi_for};
+use crate::application::AgentResult;
+use crate::domain::usage::{Severity, UsageSnapshot};
 
 const GAUGE_MIN: usize = 20;
 const GAUGE_MAX: usize = 48;
@@ -15,13 +17,38 @@ const SUFFIX_ROOM: usize = 14 + RIGHT_MARGIN;
 /// 화면 오른쪽 여백.
 const RIGHT_MARGIN: usize = 2;
 
-pub fn render(snap: &Snapshot, color: bool, width: usize) -> String {
+pub(crate) fn render(
+    snapshot: &UsageSnapshot,
+    timezone: &str,
+    color: bool,
+    width: usize,
+) -> String {
+    render_at(snapshot, timezone, color, width, chrono::Local::now())
+}
+
+fn render_at(
+    snapshot: &UsageSnapshot,
+    timezone: &str,
+    color: bool,
+    width: usize,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let meters = model::project(snapshot, timezone, now);
+    render_projected(
+        &meters,
+        &model::origin_text(snapshot.origin, now),
+        color,
+        width,
+    )
+}
+
+fn render_projected(meters: &[Meter], origin: &str, color: bool, width: usize) -> String {
     let gauge_width = width
         .saturating_sub(SUFFIX_ROOM)
         .clamp(GAUGE_MIN, GAUGE_MAX);
 
     let mut out = String::new();
-    for (i, m) in snap.meters.iter().enumerate() {
+    for (i, m) in meters.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
@@ -29,12 +56,16 @@ pub fn render(snap: &Snapshot, color: bool, width: usize) -> String {
     }
     // 값이 언제 기준인지 항상 밝힌다 — 캐시를 읽었을 수도 있기 때문이다
     let (mu, r) = if color { (MUTED, RESET) } else { ("", "") };
-    out.push_str(&format!("\n  {mu}{}{r}\n", snap.origin.text()));
+    out.push_str(&format!("\n  {mu}{origin}{r}\n"));
     out
 }
 
 fn render_one(m: &Meter, color: bool, gauge_width: usize) -> String {
-    let (b, mu, r) = if color { (BOLD, MUTED, RESET) } else { ("", "", "") };
+    let (b, mu, r) = if color {
+        (BOLD, MUTED, RESET)
+    } else {
+        ("", "", "")
+    };
     let marker = if m.emphasized { "› " } else { "  " };
 
     let mut s = String::new();
@@ -55,7 +86,11 @@ fn render_one(m: &Meter, color: bool, gauge_width: usize) -> String {
 fn render_bar(bar: &Bar, color: bool, gauge_width: usize) -> String {
     let filled = (bar.fill_clamped() * gauge_width as f64).round() as usize;
 
-    let (d, mu, r) = if color { (DIM, MUTED, RESET) } else { ("", "", "") };
+    let (d, mu, r) = if color {
+        (DIM, MUTED, RESET)
+    } else {
+        ("", "", "")
+    };
     let a = if color { ansi_for(bar.level) } else { "" };
     // 색이 꺼진 환경에서는 색만으로 채움/빈칸을 구분할 수 없으므로 글자를 바꾼다
     let empty_ch = if color { "█" } else { "░" };
@@ -82,7 +117,12 @@ const PANE_GAP: usize = 2;
 ///
 /// 터미널이 충분히 넓으면 TUI 와 같이 **좌우로**(`A | B`) 놓고,
 /// 좁으면 세로로 쌓는다 — 폭 40 짜리 게이지 두 개보다 폭 80 짜리 하나가 읽기 쉽다.
-pub fn render_panes(panes: &[crate::multi::Pane], color: bool, width: usize) -> String {
+pub(crate) fn render_panes(
+    panes: &[AgentResult],
+    timezone: &str,
+    color: bool,
+    width: usize,
+) -> String {
     let blocks: Vec<String> = panes
         .iter()
         .map(|p| {
@@ -91,7 +131,7 @@ pub fn render_panes(panes: &[crate::multi::Pane], color: bool, width: usize) -> 
             } else {
                 width
             };
-            render_pane(p, color, per)
+            render_pane(p, timezone, color, per)
         })
         .collect();
 
@@ -111,13 +151,13 @@ fn column_width(count: usize, width: usize) -> usize {
     width.saturating_sub(gaps) / count
 }
 
-fn render_pane(pane: &crate::multi::Pane, color: bool, width: usize) -> String {
+fn render_pane(pane: &AgentResult, timezone: &str, color: bool, width: usize) -> String {
     let (b, r) = if color { (BOLD, RESET) } else { ("", "") };
     let mut out = format!("{b}[{}]{r}\n", pane.agent.display);
     match &pane.result {
-        Ok(snap) => out.push_str(&render(snap, color, width)),
+        Ok(snap) => out.push_str(&render(snap, timezone, color, width)),
         // 하나가 실패해도 나머지는 계속 보여준다
-        Err(e) => out.push_str(&render_error(pane.agent.binary, &e.to_string(), color)),
+        Err(e) => out.push_str(&render_error(pane.agent.name, &e.to_string(), color)),
     }
     out
 }
@@ -172,9 +212,9 @@ fn display_width(line: &str) -> usize {
 }
 
 /// 오류도 같은 형식으로 보여준다 — `watch` 화면이 빈 채로 남지 않게.
-pub fn render_error(prog: &str, msg: &str, color: bool) -> String {
+pub(crate) fn render_error(prog: &str, msg: &str, color: bool) -> String {
     let (a, r) = if color {
-        (ansi_for(Level::Critical), RESET)
+        (ansi_for(Severity::Critical), RESET)
     } else {
         ("", "")
     };
@@ -184,18 +224,45 @@ pub fn render_error(prog: &str, msg: &str, color: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::AgentInfo;
+    use crate::domain::usage::{LimitId, Severity, UsageLimit, UsageSnapshot};
 
-    fn snap(fill: f64, emphasized: bool) -> Snapshot {
-        Snapshot::live(vec![meter(fill, emphasized)])
+    const TZ: &str = "Asia/Seoul";
+
+    fn agent(name: &'static str) -> AgentInfo {
+        AgentInfo {
+            name,
+            display: match name {
+                "claude" => "Claude Code",
+                "codex" => "Codex",
+                _ => name,
+            },
+        }
+    }
+
+    fn snap(fill: f64, emphasized: bool) -> UsageSnapshot {
+        UsageSnapshot::live(
+            vec![UsageLimit::new(
+                "session:all",
+                None,
+                fill * 100.0,
+                Some(Severity::Normal),
+                emphasized,
+                None,
+                None,
+            )],
+            chrono::Local::now(),
+        )
     }
 
     fn meter(fill: f64, emphasized: bool) -> Meter {
         Meter {
+            id: LimitId::new("session:all"),
             title: "Current session".into(),
             usage: Bar {
                 fill,
                 label: format!("{:.0}% used", fill * 100.0),
-                level: Level::Normal,
+                level: Severity::Normal,
             },
             window: None,
             time: None,
@@ -209,7 +276,7 @@ mod tests {
         m.time = Some(Bar {
             fill: time,
             label: "1 hour 12 minutes left".into(),
-            level: Level::Normal,
+            level: Severity::Normal,
         });
         m
     }
@@ -226,7 +293,7 @@ mod tests {
 
     #[test]
     fn gauge_length_matches_fill() {
-        let out = render(&snap(0.5, false), false, 200);
+        let out = render(&snap(0.5, false), TZ, false, 200);
         let (filled, empty) = gauge_counts(&out);
         assert_eq!(filled + empty, GAUGE_MAX, "게이지 전체 폭");
         assert_eq!(filled, GAUGE_MAX / 2, "0.5 는 절반만 채워져야 함");
@@ -235,28 +302,36 @@ mod tests {
     #[test]
     fn gauge_is_not_always_full() {
         for (fill, want) in [(0.0, 0), (0.25, 12), (1.0, 48)] {
-            let out = render(&snap(fill, false), false, 200);
+            let out = render(&snap(fill, false), TZ, false, 200);
             assert_eq!(gauge_counts(&out).0, want, "fill={fill}");
         }
     }
 
     #[test]
     fn no_color_emits_no_escape_codes() {
-        let out = render(&snap(0.5, false), false, 80);
-        assert!(!out.contains('\x1b'), "색 비활성화 시 escape 코드가 없어야 함");
+        let out = render(&snap(0.5, false), TZ, false, 80);
+        assert!(
+            !out.contains('\x1b'),
+            "색 비활성화 시 escape 코드가 없어야 함"
+        );
     }
 
     #[test]
     fn out_of_range_fill_does_not_panic() {
         for fill in [-0.5, 1.5, f64::NAN] {
-            let _ = render(&snap(fill, false), true, 80);
+            let _ = render(&snap(fill, false), TZ, true, 80);
         }
     }
 
     /// 시간 게이지가 있으면 사용량 바로 아래에 한 줄 더 그린다.
     #[test]
     fn time_bar_is_drawn_under_usage() {
-        let out = render(&Snapshot::live(vec![meter_with_time(0.7, 0.4)]), false, 200);
+        let out = render_projected(
+            &[meter_with_time(0.7, 0.4)],
+            "기준 12:00 (방금, 직접 조회)",
+            false,
+            200,
+        );
         let bars: Vec<&str> = out
             .lines()
             .filter(|l| l.contains('█') || l.contains('░'))
@@ -269,7 +344,7 @@ mod tests {
     /// 창 길이를 모르면 시간 게이지 없이 사용량만 그린다.
     #[test]
     fn without_time_only_one_bar() {
-        let out = render(&snap(0.5, false), false, 200);
+        let out = render(&snap(0.5, false), TZ, false, 200);
         let bars = out
             .lines()
             .filter(|l| l.contains('█') || l.contains('░'))
@@ -280,18 +355,17 @@ mod tests {
     /// 넓은 화면에서는 구획을 좌우로 나란히 놓는다.
     #[test]
     fn wide_terminal_puts_panes_side_by_side() {
-        use crate::multi::Pane;
         let panes = vec![
-            Pane {
-                agent: crate::registry::find("claude").unwrap(),
+            AgentResult {
+                agent: agent("claude"),
                 result: Ok(snap(0.5, false)),
             },
-            Pane {
-                agent: crate::registry::find("codex").unwrap(),
+            AgentResult {
+                agent: agent("codex"),
                 result: Ok(snap(0.25, false)),
             },
         ];
-        let out = render_panes(&panes, false, 160);
+        let out = render_panes(&panes, TZ, false, 160);
         let head = out.lines().next().unwrap();
         assert!(head.contains("[Claude Code]"), "{head}");
         assert!(head.contains("[Codex]"), "같은 줄에 나란히: {head}");
@@ -304,21 +378,23 @@ mod tests {
     /// 좁은 화면에서는 세로로 쌓는다 — 게이지가 쓸모없이 짧아지는 것보다 낫다.
     #[test]
     fn narrow_terminal_stacks_panes() {
-        use crate::multi::Pane;
         let panes = vec![
-            Pane {
-                agent: crate::registry::find("claude").unwrap(),
+            AgentResult {
+                agent: agent("claude"),
                 result: Ok(snap(0.5, false)),
             },
-            Pane {
-                agent: crate::registry::find("codex").unwrap(),
+            AgentResult {
+                agent: agent("codex"),
                 result: Ok(snap(0.25, false)),
             },
         ];
-        let out = render_panes(&panes, false, 60);
+        let out = render_panes(&panes, TZ, false, 60);
         let head = out.lines().next().unwrap();
         assert!(head.contains("[Claude Code]"));
-        assert!(!head.contains("[Codex]"), "좁으면 같은 줄에 두지 않는다: {head}");
+        assert!(
+            !head.contains("[Codex]"),
+            "좁으면 같은 줄에 두지 않는다: {head}"
+        );
         assert!(out.contains("[Codex]"), "아래에 있어야 함");
     }
 
@@ -334,16 +410,17 @@ mod tests {
     /// 각 구획에 에이전트 이름이 붙고, 하나가 실패해도 나머지는 그려진다.
     #[test]
     fn panes_are_labeled_and_survive_failures() {
-        use crate::multi::Pane;
-        let ok = Pane {
-            agent: crate::registry::find("claude").unwrap(),
+        let ok = AgentResult {
+            agent: agent("claude"),
             result: Ok(snap(0.5, false)),
         };
-        let bad = Pane {
-            agent: crate::registry::find("codex").unwrap(),
-            result: Err(crate::FetchError::Other(anyhow::anyhow!("조회 실패"))),
+        let bad = AgentResult {
+            agent: agent("codex"),
+            result: Err(crate::application::FetchError::Other(anyhow::anyhow!(
+                "조회 실패"
+            ))),
         };
-        let out = render_panes(&[ok, bad], false, 80);
+        let out = render_panes(&[ok, bad], TZ, false, 80);
         assert!(out.contains("[Claude Code]"), "{out}");
         assert!(out.contains("50% used"), "{out}");
         assert!(out.contains("[Codex]"), "{out}");
@@ -352,7 +429,7 @@ mod tests {
 
     #[test]
     fn narrow_terminal_still_renders() {
-        let out = render(&snap(0.5, false), false, 10);
+        let out = render(&snap(0.5, false), TZ, false, 10);
         assert!(out.contains("50% used"));
     }
 
@@ -361,7 +438,7 @@ mod tests {
     #[test]
     fn title_aligns_with_gauge() {
         for emphasized in [true, false] {
-            let out = render(&snap(0.5, emphasized), false, 200);
+            let out = render(&snap(0.5, emphasized), TZ, false, 200);
             let mut lines = out.lines();
             let title_line = lines.next().unwrap();
             let gauge_line = lines.next().unwrap();

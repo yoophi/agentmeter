@@ -17,7 +17,7 @@ use anyhow::{Context, anyhow};
 use serde_json::Value;
 
 use super::model::RateLimitsResponse;
-use crate::FetchError;
+use crate::application::FetchError;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_ID: i64 = 2;
@@ -45,7 +45,9 @@ fn spawn() -> anyhow::Result<Child> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| {
-            format!("`{bin} app-server` 를 실행할 수 없습니다. Codex CLI 가 설치되어 있는지 확인하세요")
+            format!(
+                "`{bin} app-server` 를 실행할 수 없습니다. Codex CLI 가 설치되어 있는지 확인하세요"
+            )
         })
 }
 
