@@ -6,7 +6,7 @@
 //! 이미 정규화해 둔 `limits` 배열에서만 읽는다.
 
 use chrono::{DateTime, Local};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::meter::{
     Bar, Level, Meter, Window, level_from_used, pending_bar, resets_text, time_bar,
@@ -19,13 +19,13 @@ const SESSION_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(5);
 /// 주간 한도 창 길이 (`seven_day`).
 const WEEK_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(7);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UsageResponse {
     #[serde(default)]
     pub limits: Vec<Limit>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Limit {
     /// `session` | `weekly_all` | `weekly_scoped` | (그 외 미래 값)
     pub kind: String,
@@ -44,13 +44,13 @@ pub struct Limit {
     pub is_active: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scope {
     #[serde(default)]
     pub model: Option<ScopeModel>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeModel {
     #[serde(default)]
     pub display_name: Option<String>,
@@ -96,7 +96,6 @@ impl Limit {
             .ok()
             .map(|dt| dt.with_timezone(&Local))
     }
-
 }
 
 /// 한도 종류로 창 길이를 정한다.
@@ -116,15 +115,26 @@ fn window_for(kind: &str) -> Option<chrono::TimeDelta> {
 pub fn to_meters(limits: &[Limit], tz: &str) -> Vec<Meter> {
     // 한 번만 읽어 모든 항목이 같은 기준 시각을 쓰게 한다
     let now = Local::now();
+    // 활성화되지 않은 모델별 주간 한도는 resets_at 이 null 일 수 있다.
+    // 같은 weekly 그룹의 전체 한도는 창 경계를 제공하므로 그 값을 공유한다.
+    let weekly_reset = limits
+        .iter()
+        .filter(|limit| limit.kind.starts_with("weekly"))
+        .find_map(Limit::resets_at_local);
     limits
         .iter()
         .map(|l| {
             // 타임스탬프는 한 번만 파싱해서 게이지와 각주가 함께 쓴다
-            let at = l.resets_at_local();
-            let window = at.zip(window_for(&l.kind)).map(|(at, len)| Window {
-                resets_at: at,
-                len,
+            let at = l.resets_at_local().or_else(|| {
+                if l.kind.starts_with("weekly") {
+                    weekly_reset
+                } else {
+                    None
+                }
             });
+            let window = at
+                .zip(window_for(&l.kind))
+                .map(|(at, len)| Window { resets_at: at, len });
             Meter {
                 title: l.title(),
                 usage: Bar::used(l.percent, Some(l.level())),
@@ -139,4 +149,27 @@ pub fn to_meters(limits: &[Limit], tz: &str) -> Vec<Meter> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_weekly_limit_inherits_the_group_reset() {
+        let response: UsageResponse = serde_json::from_str(
+            r#"{"limits":[
+                {"kind":"weekly_all","percent":1,
+                 "resets_at":"2026-08-25T16:00:00Z"},
+                {"kind":"weekly_scoped","percent":0,"resets_at":null,
+                 "scope":{"model":{"display_name":"Fable"}}}
+            ]}"#,
+        )
+        .unwrap();
+
+        let meters = to_meters(&response.limits, "Asia/Seoul");
+        assert_eq!(meters[0].window, meters[1].window);
+        assert_eq!(meters[1].title, "Current week (Fable)");
+        assert!(meters[1].footnote.is_some());
+    }
 }

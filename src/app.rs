@@ -11,7 +11,8 @@ use crate::render::{self, plain};
 use crate::{FetchError, local_tz};
 
 /// 한 번 조회해 화면 표현을 만든다. 상주 모드에서는 워커 스레드가 반복 호출한다.
-pub type Fetch = Box<dyn Fn() -> Result<Snapshot, FetchError> + Send>;
+/// 인자가 `true`면 캐시를 건너뛰는 강제 live 요청이다.
+pub type Fetch = Box<dyn Fn(bool) -> Result<Snapshot, FetchError> + Send>;
 
 /// 조회기를 만든다. `tz` 는 각주 문구용이라 프로세스마다 한 번만 해석해 넘긴다.
 /// `live` 는 캐시를 건너뛸지 여부 (`--live`).
@@ -35,7 +36,7 @@ fn run(prog: &'static str, args: &Cli, make_fetch: MakeFetch) -> Result<ExitCode
     let fetch = make_fetch(tz.clone(), args.live);
 
     if args.json {
-        let snap = fetch()?;
+        let snap = fetch(false)?;
         println!("{}", crate::render::to_json(&snap)?);
         return Ok(ExitCode::SUCCESS);
     }
@@ -64,9 +65,13 @@ fn once(prog: &str, args: &Cli, is_tty: bool, fetch: Fetch) -> Result<ExitCode> 
     let color = render::use_color(args.no_color, is_tty);
     let width = terminal_width();
 
-    let (text, ok) = once_output(prog, color, width, fetch());
+    let (text, ok) = once_output(prog, color, width, fetch(false));
     write!(std::io::stdout().lock(), "{text}")?;
-    Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// 1회 출력의 본문과 성공 여부.
@@ -132,7 +137,10 @@ mod tests {
             let (text, ok) = once_output("ccmeter", false, 80, Err(err));
             assert!(!ok, "실패는 실패 코드여야 함");
             assert!(text.contains(&expect), "본문에 사유가 있어야 함: {text}");
-            assert!(text.starts_with("ccmeter:"), "프로그램 이름으로 시작: {text}");
+            assert!(
+                text.starts_with("ccmeter:"),
+                "프로그램 이름으로 시작: {text}"
+            );
         }
     }
 }
