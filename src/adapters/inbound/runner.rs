@@ -28,6 +28,10 @@ struct Root {
     command: Option<Command>,
     #[command(flatten)]
     view: Cli,
+
+    /// 설정과 관계없이 이번 실행에 표시할 에이전트
+    #[arg(long, global = true, value_name = "NAME")]
+    agent: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -90,23 +94,37 @@ pub(crate) fn main_agentmeter() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => report_error(MULTI_PROG, error),
         },
-        Some(Command::Web(arguments)) => match runtime.settings.load() {
-            Ok(settings) => match web_command(arguments, runtime, settings.agents) {
+        Some(Command::Web(arguments)) => match selected_agent_names(root.agent.as_deref(), || {
+            runtime.settings.load().map(|settings| settings.agents)
+        }) {
+            Ok(names) => match web_command(arguments, runtime, names) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => report_error(MULTI_PROG, error),
             },
             Err(error) => report_error(MULTI_PROG, error),
         },
-        None => match runtime.settings.load() {
-            Ok(settings) => finish(
+        None => match selected_agent_names(root.agent.as_deref(), || {
+            runtime.settings.load().map(|settings| settings.agents)
+        }) {
+            Ok(names) => finish(
                 MULTI_PROG,
                 &root.view,
                 runtime.usage,
                 runtime.history,
-                settings.agents,
+                names,
             ),
             Err(error) => report_error(MULTI_PROG, error),
         },
+    }
+}
+
+fn selected_agent_names(
+    agent: Option<&str>,
+    load_configured: impl FnOnce() -> Result<Vec<String>>,
+) -> Result<Vec<String>> {
+    match agent {
+        Some(name) => Ok(vec![name.to_string()]),
+        None => load_configured(),
     }
 }
 
@@ -128,25 +146,6 @@ fn web_command(arguments: WebArgs, runtime: Runtime, names: Vec<String>) -> Resu
         host: arguments.host,
         live: arguments.live,
     })
-}
-
-pub(crate) fn main_single(
-    prog: &'static str,
-    about: &'static str,
-    agent_name: &'static str,
-) -> ExitCode {
-    let arguments = Cli::parse_for(prog, about);
-    let runtime = match bootstrap::production() {
-        Ok(runtime) => runtime,
-        Err(error) => return report_error(prog, error),
-    };
-    finish(
-        prog,
-        &arguments,
-        runtime.usage,
-        runtime.history,
-        vec![agent_name.to_string()],
-    )
 }
 
 fn finish(
@@ -354,7 +353,7 @@ mod tests {
 
     #[test]
     fn success_renders_the_domain_snapshot() {
-        let (text, success) = once_output("ccmeter", "Asia/Seoul", false, 80, &Ok(snapshot()));
+        let (text, success) = once_output("agentmeter", "Asia/Seoul", false, 80, &Ok(snapshot()));
         assert!(success);
         assert!(text.contains("Current session"));
         assert!(text.contains("50% used"));
@@ -363,10 +362,10 @@ mod tests {
     #[test]
     fn failures_are_rendered_in_the_body() {
         let error = FetchError::Unauthorized("재로그인 필요".into());
-        let (text, success) = once_output("ccmeter", "Asia/Seoul", false, 80, &Err(error));
+        let (text, success) = once_output("agentmeter", "Asia/Seoul", false, 80, &Err(error));
         assert!(!success);
         assert!(text.contains("재로그인 필요"));
-        assert!(text.starts_with("ccmeter:"));
+        assert!(text.starts_with("agentmeter:"));
     }
 
     #[test]
@@ -377,6 +376,33 @@ mod tests {
         );
         assert_eq!(split_list("claude, codex,"), vec!["claude", "codex"]);
         assert!(split_assignment("agents").is_err());
+    }
+
+    #[test]
+    fn explicit_agent_overrides_configuration_without_loading_it() {
+        let names = selected_agent_names(Some("claude"), || {
+            panic!("명시적 agent가 있으면 설정을 읽지 않아야 함")
+        })
+        .unwrap();
+        assert_eq!(names, vec!["claude"]);
+    }
+
+    #[test]
+    fn absent_agent_uses_configuration() {
+        let names =
+            selected_agent_names(None, || Ok(vec!["codex".into(), "claude".into()])).unwrap();
+        assert_eq!(names, vec!["codex", "claude"]);
+    }
+
+    #[test]
+    fn agent_override_combines_with_watch_and_json_modes() {
+        let watch = Root::try_parse_from(["agentmeter", "--agent", "claude", "--watch"]).unwrap();
+        assert_eq!(watch.agent.as_deref(), Some("claude"));
+        assert!(watch.view.watch);
+
+        let json = Root::try_parse_from(["agentmeter", "--agent", "codex", "--json"]).unwrap();
+        assert_eq!(json.agent.as_deref(), Some("codex"));
+        assert!(json.view.json);
     }
 
     #[test]
@@ -398,6 +424,8 @@ mod tests {
         let root = Root::try_parse_from([
             "agentmeter",
             "web",
+            "--agent",
+            "claude",
             "--live",
             "--interval",
             "90",
@@ -407,6 +435,7 @@ mod tests {
             "0.0.0.0",
         ])
         .unwrap();
+        assert_eq!(root.agent.as_deref(), Some("claude"));
         let Some(Command::Web(arguments)) = root.command else {
             panic!("web subcommand를 파싱해야 함");
         };

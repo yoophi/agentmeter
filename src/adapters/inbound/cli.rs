@@ -1,4 +1,4 @@
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(version, long_about = None)]
@@ -15,7 +15,7 @@ pub struct Cli {
     #[arg(short = 'j', long, conflicts_with_all = ["watch", "interval"])]
     pub json: bool,
 
-    /// 로컬 캐시를 건너뛰고 직접 조회합니다 (ccmeter 전용)
+    /// 로컬 캐시를 건너뛰고 직접 조회합니다
     #[arg(long)]
     pub live: bool,
 
@@ -29,12 +29,6 @@ pub const DEFAULT_INTERVAL: u64 = 60;
 pub const MIN_INTERVAL: u64 = 30;
 
 impl Cli {
-    /// 두 도구가 같은 옵션을 쓰되 이름과 설명만 바꿔 단다.
-    pub fn parse_for(name: &'static str, about: &'static str) -> Self {
-        let cmd = Self::command().name(name).about(about);
-        Self::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|e| e.exit())
-    }
-
     /// `--watch` 또는 `--interval` 중 하나라도 있으면 상주 모드.
     pub fn is_watch(&self) -> bool {
         self.watch || self.interval.is_some()

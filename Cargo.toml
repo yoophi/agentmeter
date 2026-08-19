@@ -2,7 +2,7 @@
 name = "agentmeter"
 version = "0.1.0"
 edition = "2024"
-description = "코딩 에이전트의 사용 한도를 같은 형식으로 보여주는 CLI 모음 (ccmeter, codexmeter)"
+description = "코딩 에이전트의 사용 한도를 같은 형식으로 보여주는 CLI"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -25,14 +25,6 @@ unicode-width = "0.2.2"
 [lib]
 name = "agentmeter"
 path = "src/lib.rs"
-
-[[bin]]
-name = "ccmeter"
-path = "src/bin/ccmeter.rs"
-
-[[bin]]
-name = "codexmeter"
-path = "src/bin/codexmeter.rs"
 
 [[bin]]
 name = "agentmeter"

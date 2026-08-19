@@ -122,7 +122,7 @@ fn handshake() -> Vec<String> {
             "id": 1,
             "method": "initialize",
             "params": {"clientInfo": {
-                "name": "codexmeter",
+                "name": "agentmeter",
                 "version": env!("CARGO_PKG_VERSION"),
             }},
         })

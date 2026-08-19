@@ -9,7 +9,7 @@ use crate::application::FetchError;
 
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
-const USER_AGENT: &str = concat!("ccmeter/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("agentmeter/", env!("CARGO_PKG_VERSION"));
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 자격증명을 매번 새로 읽어서 호출한다.

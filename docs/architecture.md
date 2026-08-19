@@ -1,6 +1,6 @@
 # 아키텍처
 
-`agentmeter`는 `agentmeter`, `ccmeter`, `codexmeter` 세 실행 파일을 제공하며,
+`agentmeter`는 하나의 실행 파일에서 설정 또는 `--agent`로 provider를 선택하며,
 핵심 정책이 HTTP·프로세스·파일시스템·터미널 기술에 의존하지 않도록 헥사고날
 아키텍처로 구성합니다.
 
@@ -32,9 +32,8 @@ flowchart LR
 - `src/bootstrap.rs` — 구체 어댑터를 포트에 연결하는 유일한 composition root
 - `src/bin/` — 공개 실행 함수 하나만 호출하는 얇은 프로세스 진입점
 
-라이브러리 공개 표면은 `run_agentmeter`, `run_ccmeter`, `run_codexmeter` 세 함수로
-제한합니다. 내부 포트와 어댑터를 외부 API로 노출하지 않아 계층 구조를 구현 세부사항으로
-유지합니다.
+라이브러리 공개 표면은 `run_agentmeter` 하나로 제한합니다. 내부 포트와 어댑터를
+외부 API로 노출하지 않아 계층 구조를 구현 세부사항으로 유지합니다.
 
 ## 도메인과 화면 모델 분리
 
@@ -190,15 +189,15 @@ JSON을 2초마다 읽어 bar chart와 SVG area chart를 갱신하며, 실제 pr
 2. 응답을 `UsageLimit` 목록으로 정규화합니다. 제목이나 색상은 만들지 않습니다.
 3. `UsageSource`를 구현해 `UsageSnapshot`을 반환합니다.
 4. `bootstrap.rs`에서 `RegisteredAgent`로 조립합니다.
-5. 필요하면 `src/bin/`에 공개 실행 함수만 호출하는 전용 바이너리를 추가합니다.
+5. CLI 선택이 필요하면 `agentmeter --agent <name>` 경로와 문서를 검증합니다.
 
 설정 검증, 병렬 조회, stale 값 보존, plain·TUI·JSON 표현은 기존 경로를 그대로 재사용합니다.
 
 ## 관련 문서
 
 - [아키텍처 리뷰](architecture-review.html)
-- [Claude 조회 정책](ccmeter.md)
-- [Codex app-server 연동](codexmeter.md)
+- [Claude 조회 정책](claude-provider.md)
+- [Codex app-server 연동](codex-provider.md)
 
 ## 후속 deepening 작업
 
