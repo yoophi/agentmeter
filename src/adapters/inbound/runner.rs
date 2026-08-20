@@ -24,7 +24,7 @@ const MULTI_PROG: &str = "agentmeter";
 const MULTI_ABOUT: &str = "설정한 에이전트들의 사용 한도를 한 화면에서 보여줍니다";
 
 #[derive(Debug, Parser)]
-#[command(name = MULTI_PROG, about = MULTI_ABOUT, version, long_about = None)]
+#[command(name = MULTI_PROG, about = MULTI_ABOUT, version = crate::VERSION, long_about = None)]
 struct Root {
     #[command(subcommand)]
     command: Option<Command>,
@@ -475,6 +475,29 @@ mod tests {
         assert_eq!(arguments.interval_secs(), 90);
         assert_eq!(arguments.port, Some(8080));
         assert_eq!(arguments.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn version_extends_the_calver_package_version() {
+        let package = env!("CARGO_PKG_VERSION");
+        assert!(crate::VERSION.starts_with(package), "{}", crate::VERSION);
+        // 개발 빌드는 `YYYY.M.#-<hash>`, 릴리즈 빌드는 CalVer 버전 그대로다.
+        match crate::VERSION.strip_prefix(package) {
+            Some("") => {}
+            Some(suffix) => assert!(
+                suffix.starts_with('-') && suffix.len() > 1,
+                "개발 버전 접미사는 `-`로 시작해야 함: {suffix}"
+            ),
+            None => unreachable!("접두사를 이미 확인했다"),
+        }
+    }
+
+    #[test]
+    fn version_flag_reports_the_build_version() {
+        let rendered = Root::try_parse_from(["agentmeter", "--version"])
+            .expect_err("clap은 --version을 오류로 돌려준다")
+            .to_string();
+        assert!(rendered.contains(crate::VERSION), "{rendered}");
     }
 
     #[test]

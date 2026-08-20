@@ -1,7 +1,7 @@
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(version, long_about = None)]
+#[command(version = crate::VERSION, long_about = None)]
 pub struct Cli {
     /// 상주 모드 — 전체 화면으로 계속 갱신합니다
     #[arg(short = 'w', long)]
