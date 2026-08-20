@@ -159,39 +159,64 @@ fn project_chart(samples: &[UsageSample], window: UsageWindow) -> Chart {
         })
         .collect();
 
-    let points: Vec<(f64, f64)> = samples
+    let inside: Vec<UsageSample> = samples
         .iter()
-        .map(|sample| (sample.minute * 60, sample.percent))
-        .filter(|(at, _)| *at >= started_at && *at < resets_at)
-        .map(|(at, percent)| {
-            (
-                normalized_x(at, started_at, span),
-                47.0 - percent.clamp(0.0, 100.0) * 0.43,
-            )
+        .copied()
+        .filter(|sample| {
+            let at = sample.minute * 60;
+            at >= started_at && at < resets_at
         })
         .collect();
-    if points.len() < 2 {
+
+    // 기록이 끊긴 구간을 이어 그리면 없는 측정을 있는 것처럼 보이게 하므로,
+    // 구간마다 subpath를 따로 만들어 공백은 비워 둔다.
+    let mut lines = Vec::new();
+    let mut areas = Vec::new();
+    for run in super::history::segments(&inside) {
+        let points: Vec<(f64, f64)> = run
+            .iter()
+            .map(|sample| {
+                (
+                    normalized_x(sample.minute * 60, started_at, span),
+                    47.0 - sample.percent.clamp(0.0, 100.0) * 0.43,
+                )
+            })
+            .collect();
+        let [(x, y)] = points[..] else {
+            if points.is_empty() {
+                continue;
+            }
+            let line = points
+                .iter()
+                .enumerate()
+                .map(|(index, (x, y))| {
+                    format!("{}{x:.1} {y:.1}", if index == 0 { "M" } else { "L" })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let first_x = points[0].0;
+            let last_x = points[points.len() - 1].0;
+            areas.push(format!(
+                "M{first_x:.1} 48 L{} L{last_x:.1} 48 Z",
+                line.strip_prefix('M').unwrap_or(&line)
+            ));
+            lines.push(line);
+            continue;
+        };
+        // 공백 뒤 첫 표본처럼 구간에 점이 하나뿐이면 면은 폭이 0이라 보이지 않는다.
+        // 길이 0인 subpath를 두면 `stroke-linecap: round`가 점으로 그려 준다.
+        lines.push(format!("M{x:.1} {y:.1} L{x:.1} {y:.1}"));
+    }
+    if lines.is_empty() {
         return Chart {
             markers,
             ..Chart::default()
         };
     }
 
-    let line_path = points
-        .iter()
-        .enumerate()
-        .map(|(index, (x, y))| format!("{}{x:.1} {y:.1}", if index == 0 { "M" } else { "L" }))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let first_x = points[0].0;
-    let last_x = points[points.len() - 1].0;
-    let area_path = format!(
-        "M{first_x:.1} 48 L{} L{last_x:.1} 48 Z",
-        line_path.strip_prefix('M').unwrap_or(&line_path)
-    );
     Chart {
-        area_path,
-        line_path,
+        area_path: areas.join(" "),
+        line_path: lines.join(" "),
         markers,
     }
 }
@@ -327,6 +352,108 @@ mod tests {
         assert!(meter.chart.line_path.starts_with('M'));
         assert!(meter.chart.area_path.ends_with('Z'));
         assert_eq!(meter.delta.as_deref(), Some("+10%p"));
+    }
+
+    #[test]
+    fn a_recording_gap_leaves_the_area_chart_empty_there() {
+        use chrono::TimeZone;
+
+        let window = UsageWindow {
+            resets_at: Local
+                .with_ymd_and_hms(2026, 8, 20, 12, 0, 0)
+                .single()
+                .unwrap(),
+            duration: TimeDelta::hours(5),
+        };
+        let start = window.started_at().timestamp() / 60;
+        // 창 앞쪽에 5분, 3시간을 쉬고 다시 5분 기록한다.
+        let mut samples: Vec<UsageSample> = (0..5)
+            .map(|minute| UsageSample {
+                minute: start + minute,
+                percent: 10.0,
+            })
+            .collect();
+        samples.extend((0..5).map(|minute| UsageSample {
+            minute: start + 180 + minute,
+            percent: 40.0,
+        }));
+
+        let projected = project_chart(&samples, window);
+        assert_eq!(
+            projected.line_path.matches('M').count(),
+            2,
+            "기록이 끊긴 자리에서 선도 끊겨야 함: {}",
+            projected.line_path
+        );
+        assert_eq!(
+            projected.area_path.matches('Z').count(),
+            2,
+            "면도 구간마다 닫혀야 함: {}",
+            projected.area_path
+        );
+    }
+
+    #[test]
+    fn a_lone_sample_after_a_gap_is_still_drawn() {
+        use chrono::TimeZone;
+
+        let window = UsageWindow {
+            resets_at: Local
+                .with_ymd_and_hms(2026, 8, 20, 12, 0, 0)
+                .single()
+                .unwrap(),
+            duration: TimeDelta::hours(5),
+        };
+        let start = window.started_at().timestamp() / 60;
+        let mut samples: Vec<UsageSample> = (0..5)
+            .map(|minute| UsageSample {
+                minute: start + minute,
+                percent: 10.0,
+            })
+            .collect();
+        // 오래 껐다가 방금 다시 켜서 표본이 하나뿐인 구간.
+        samples.push(UsageSample {
+            minute: start + 200,
+            percent: 40.0,
+        });
+
+        let projected = project_chart(&samples, window);
+        assert_eq!(
+            projected.line_path.matches('M').count(),
+            2,
+            "표본이 하나인 구간도 남아야 함: {}",
+            projected.line_path
+        );
+        assert_eq!(
+            projected.area_path.matches('Z').count(),
+            1,
+            "점 하나로는 면을 만들 수 없다: {}",
+            projected.area_path
+        );
+    }
+
+    #[test]
+    fn continuous_recording_stays_one_path() {
+        use chrono::TimeZone;
+
+        let window = UsageWindow {
+            resets_at: Local
+                .with_ymd_and_hms(2026, 8, 20, 12, 0, 0)
+                .single()
+                .unwrap(),
+            duration: TimeDelta::hours(5),
+        };
+        let start = window.started_at().timestamp() / 60;
+        let samples: Vec<UsageSample> = (0..30)
+            .map(|minute| UsageSample {
+                minute: start + minute,
+                percent: 10.0 + minute as f64,
+            })
+            .collect();
+
+        let projected = project_chart(&samples, window);
+        assert_eq!(projected.line_path.matches('M').count(), 1);
+        assert_eq!(projected.area_path.matches('Z').count(), 1);
     }
 
     #[test]
