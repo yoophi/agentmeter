@@ -59,7 +59,12 @@
     .chrome-toggle .hidden-mark { display: none; }
     .chrome-hidden .chrome-toggle .hidden-mark { display: block; }
     .chrome-hidden header, .chrome-hidden footer { display: none; }
-    .chrome-hidden .shell { padding-top: 10px; }
+    .chrome-hidden .shell {
+      min-height: 100vh; min-height: 100dvh;
+      display: flex; flex-direction: column;
+      padding-block: 10px;
+    }
+    .chrome-hidden #panes { margin-block: auto; }
     .status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10.56px; margin-right: 4px; }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
     .status-dot.busy { background: var(--warning); animation: pulse 1s infinite; }
