@@ -1,76 +1,172 @@
 //! 로컬 웹 대시보드 인바운드 어댑터.
+//!
+//! 조회 상태는 `LiveSession`이 소유한다. 이 어댑터는 그 상태를 HTTP로 노출하고
+//! 새로고침 요청을 세션에 전달하기만 한다.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, Result, bail};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{Local, TimeDelta};
+use chrono::Local;
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::Notify;
 
 use crate::adapters::presentation::web as presentation;
-use crate::application::{
-    HistoryRepository, RefreshCoordinator, RefreshDecision, UsageApplication, WatchState,
-};
+use crate::application::LiveSession;
+
+/// 런타임 종료를 기다리는 상한. 조회가 진행 중이어도 프롬프트를 오래 붙잡지 않는다.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 
 pub(crate) struct Options {
-    pub application: UsageApplication,
-    pub history: Arc<dyn HistoryRepository>,
-    pub names: Vec<String>,
+    pub session: Arc<LiveSession>,
     pub timezone: String,
-    pub interval_secs: u64,
     pub port: Option<u16>,
     pub host: IpAddr,
-    pub live: bool,
-}
-
-struct DashboardState {
-    watch: WatchState,
-    refreshing: bool,
-    next_refresh_at: Option<chrono::DateTime<Local>>,
+    /// TUI와 함께 뜨면 터미널이 화면에 쓰이므로 진단 출력을 억제한다.
+    pub quiet: bool,
 }
 
 #[derive(Clone)]
 struct WebState {
-    application: UsageApplication,
-    names: Arc<Vec<String>>,
+    session: Arc<LiveSession>,
     timezone: Arc<String>,
-    interval: Duration,
-    dashboard: Arc<RwLock<DashboardState>>,
-    refresh: Arc<RefreshCoordinator>,
+    quiet: bool,
 }
 
-pub(crate) fn run(options: Options) -> anyhow::Result<()> {
-    let agents = options.application.info(&options.names)?;
-    let port = options.port.unwrap_or(0);
-    let host = options.host;
-    let state = WebState {
-        application: options.application,
-        names: Arc::new(options.names),
-        timezone: Arc::new(options.timezone),
-        interval: Duration::from_secs(options.interval_secs),
-        dashboard: Arc::new(RwLock::new(DashboardState {
-            watch: WatchState::persistent(agents, options.history),
-            refreshing: false,
-            next_refresh_at: None,
-        })),
-        refresh: Arc::new(RefreshCoordinator::new(options.live)),
-    };
+impl WebState {
+    fn report(&self, error: &dyn std::fmt::Display) {
+        if !self.quiet {
+            eprintln!("agentmeter web: {error}");
+        }
+    }
+}
 
-    tokio::runtime::Builder::new_multi_thread()
+/// 백그라운드에서 도는 대시보드 서버. 주소는 바인딩 직후 확정된다.
+pub(crate) struct Server {
+    address: SocketAddr,
+    shutdown: Arc<Notify>,
+    thread: JoinHandle<Result<()>>,
+}
+
+impl Server {
+    pub(crate) fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    /// 종료를 요청하고 서버 스레드가 정리될 때까지 기다린다.
+    pub(crate) fn shutdown(self) -> Result<()> {
+        self.shutdown.notify_one();
+        self.join()
+    }
+
+    /// Ctrl-C 처럼 서버가 스스로 끝낼 때까지 기다린다.
+    pub(crate) fn wait(self) -> Result<()> {
+        self.join()
+    }
+
+    fn join(self) -> Result<()> {
+        match self.thread.join() {
+            Ok(result) => result,
+            Err(_) => bail!("웹 서버 스레드가 비정상 종료했습니다"),
+        }
+    }
+}
+
+/// 서버를 백그라운드 스레드에서 띄우고 확정된 주소를 돌려준다.
+///
+/// 바인딩 실패는 이 함수의 오류로 나온다 — 화면을 띄우기 전에 알아야 한다.
+pub(crate) fn spawn(options: Options) -> Result<Server> {
+    let shutdown = Arc::new(Notify::new());
+    let signal = Arc::clone(&shutdown);
+    let host = options.host;
+    let port = options.port.unwrap_or(0);
+    let state = WebState {
+        session: options.session,
+        timezone: Arc::new(options.timezone),
+        quiet: options.quiet,
+    };
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<SocketAddr>>();
+
+    let thread = thread::Builder::new()
+        .name("agentmeter-web".into())
+        .spawn(move || serve_blocking(state, host, port, signal, ready_tx))
+        .context("웹 서버 스레드를 만들 수 없습니다")?;
+
+    match ready_rx.recv() {
+        Ok(Ok(address)) => Ok(Server {
+            address,
+            shutdown,
+            thread,
+        }),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
+        }
+        Err(_) => {
+            let _ = thread.join();
+            bail!("웹 서버가 주소를 알리지 못했습니다")
+        }
+    }
+}
+
+fn serve_blocking(
+    state: WebState,
+    host: IpAddr,
+    port: u16,
+    shutdown: Arc<Notify>,
+    ready: mpsc::Sender<Result<SocketAddr>>,
+) -> Result<()> {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("웹 서버 런타임을 만들 수 없습니다")?
-        .block_on(serve(state, host, port))
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return report_startup(
+                &ready,
+                Err(anyhow::Error::new(error).context("웹 서버 런타임을 만들 수 없습니다")),
+            );
+        }
+    };
+
+    let bound = runtime.block_on(bind(host, port));
+    let (listener, address) = match bound {
+        Ok(pair) => pair,
+        Err(error) => return report_startup(&ready, Err(error)),
+    };
+    if ready.send(Ok(address)).is_err() {
+        // 호출자가 사라졌으면 서버를 띄울 이유가 없다.
+        return Ok(());
+    }
+
+    let served = runtime.block_on(async move {
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(shutdown_signal(shutdown))
+            .await
+            .context("웹 서버 실행 실패")
+    });
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
+    served
 }
 
-async fn serve(state: WebState, host: IpAddr, port: u16) -> anyhow::Result<()> {
+/// 시작 실패는 호출자에게만 전하고 스레드 자체는 조용히 끝낸다.
+fn report_startup(
+    ready: &mpsc::Sender<Result<SocketAddr>>,
+    result: Result<SocketAddr>,
+) -> Result<()> {
+    let _ = ready.send(result);
+    Ok(())
+}
+
+async fn bind(host: IpAddr, port: u16) -> Result<(tokio::net::TcpListener, SocketAddr)> {
     let listener = tokio::net::TcpListener::bind((host, port))
         .await
         .with_context(|| {
@@ -83,16 +179,7 @@ async fn serve(state: WebState, host: IpAddr, port: u16) -> anyhow::Result<()> {
     let address = listener
         .local_addr()
         .context("할당된 포트를 읽을 수 없습니다")?;
-    let app = router(state.clone());
-
-    println!("agentmeter web: http://{address}");
-    println!("종료하려면 Ctrl-C를 누르세요.");
-
-    tokio::spawn(refresh_loop(state));
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("웹 서버 실행 실패")
+    Ok((listener, address))
 }
 
 fn router(state: WebState) -> Router {
@@ -114,14 +201,17 @@ async fn index() -> impl IntoResponse {
 }
 
 async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
-    let current = state.dashboard.read().await;
-    Json(presentation::project(
-        &current.watch,
-        &state.timezone,
-        Local::now(),
-        current.next_refresh_at,
-        current.refreshing,
-    ))
+    let payload = {
+        let current = state.session.read();
+        presentation::project(
+            &current.watch,
+            &state.timezone,
+            Local::now(),
+            current.next_refresh_at,
+            current.refreshing,
+        )
+    };
+    Json(payload)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -134,86 +224,123 @@ async fn refresh(
     State(state): State<WebState>,
     Query(query): Query<RefreshQuery>,
 ) -> impl IntoResponse {
-    match refresh_once(&state, query.live).await {
-        Ok(()) => StatusCode::NO_CONTENT,
+    let session = Arc::clone(&state.session);
+    // 조회는 blocking이라 런타임 워커를 막지 않도록 따로 돌린다.
+    match tokio::task::spawn_blocking(move || session.refresh_blocking(query.live)).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT,
+        Ok(Err(error)) => {
+            state.report(&format!("{error:#}"));
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
         Err(error) => {
-            eprintln!("agentmeter web: {error:#}");
+            state.report(&format!("조회 작업이 중단되었습니다: {error}"));
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
 
-async fn refresh_loop(state: WebState) {
-    loop {
-        if let Err(error) = refresh_once(&state, false).await {
-            eprintln!("agentmeter web: {error:#}");
+async fn shutdown_signal(shutdown: Arc<Notify>) {
+    tokio::select! {
+        _ = shutdown.notified() => {}
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                eprintln!("agentmeter web: 종료 신호를 기다릴 수 없습니다: {error}");
+            }
         }
-        {
-            let mut dashboard = state.dashboard.write().await;
-            dashboard.next_refresh_at =
-                Some(Local::now() + TimeDelta::seconds(state.interval.as_secs() as i64));
-        }
-        tokio::time::sleep(state.interval).await;
-    }
-}
-
-async fn refresh_once(state: &WebState, force_live: bool) -> anyhow::Result<()> {
-    let RefreshDecision::Execute(mut policy) = state.refresh.request(force_live) else {
-        return Ok(());
-    };
-    state.dashboard.write().await.refreshing = true;
-    let mut first_error = None;
-
-    loop {
-        let application = state.application.clone();
-        let names = Arc::clone(&state.names);
-        let result = tokio::task::spawn_blocking(move || application.query(&names, policy))
-            .await
-            .context("조회 작업이 중단되었습니다")
-            .and_then(|result| result);
-        match result {
-            Ok(results) => state.dashboard.write().await.watch.apply(results),
-            Err(error) if first_error.is_none() => first_error = Some(error),
-            Err(_) => {}
-        }
-
-        match state.refresh.complete() {
-            Some(pending) => policy = pending,
-            None => break,
-        }
-    }
-    state.dashboard.write().await.refreshing = false;
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        eprintln!("agentmeter web: 종료 신호를 기다릴 수 없습니다: {error}");
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
+    use chrono::DateTime;
+
     use super::*;
+    use crate::application::{
+        AgentInfo, FetchError, FetchPolicy, HistoryRepository, HistoryRestore, RegisteredAgent,
+        UsageApplication, UsageSource, WindowHistory,
+    };
+    use crate::domain::usage::UsageSnapshot;
+
+    struct StubSource;
+
+    impl UsageSource for StubSource {
+        fn fetch(&self, _policy: FetchPolicy) -> Result<UsageSnapshot, FetchError> {
+            Ok(UsageSnapshot::live(vec![], Local::now()))
+        }
+    }
+
+    struct NoHistory;
+
+    impl HistoryRepository for NoHistory {
+        fn restore_active(&self, _provider: &str, _at: DateTime<Local>) -> Result<HistoryRestore> {
+            Ok(HistoryRestore::default())
+        }
+
+        fn record(&self, _provider: &str, _snapshot: &UsageSnapshot) -> Result<Vec<WindowHistory>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn session() -> Arc<LiveSession> {
+        let info = AgentInfo {
+            name: "claude",
+            display: "Claude Code",
+        };
+        let application =
+            UsageApplication::new(vec![RegisteredAgent::new(info, StubSource)]).unwrap();
+        Arc::new(LiveSession::new(
+            application,
+            vec!["claude".into()],
+            vec![info],
+            Arc::new(NoHistory),
+            false,
+        ))
+    }
+
+    fn options(session: Arc<LiveSession>) -> Options {
+        Options {
+            session,
+            timezone: "Asia/Seoul".into(),
+            port: None,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            quiet: true,
+        }
+    }
 
     #[test]
-    fn binds_an_ephemeral_loopback_port() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let address = runtime.block_on(async {
-            tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                .await
-                .unwrap()
-                .local_addr()
-                .unwrap()
-        });
+    fn spawn_reports_the_bound_address_before_the_screen_starts() {
+        let server = spawn(options(session())).unwrap();
+        let address = server.address();
         assert_eq!(address.ip().to_string(), "127.0.0.1");
         assert_ne!(address.port(), 0);
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_taken_port_fails_before_the_screen_starts() {
+        let held = spawn(options(session())).unwrap();
+        let mut taken = options(session());
+        taken.port = Some(held.address().port());
+        let error = match spawn(taken) {
+            Ok(_) => panic!("이미 쓰는 포트에는 바인딩되지 않아야 함"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("포트를 열 수 없습니다"),
+            "{error:#}"
+        );
+        held.shutdown().unwrap();
+    }
+
+    #[test]
+    fn the_screen_and_the_server_read_one_session() {
+        let session = session();
+        let server = spawn(options(Arc::clone(&session))).unwrap();
+        session.refresh_blocking(false).unwrap();
+        assert!(session.read().watch.panes()[0].snapshot.is_some());
+        server.shutdown().unwrap();
     }
 
     #[test]

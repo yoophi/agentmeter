@@ -3,6 +3,7 @@
 mod error;
 mod ports;
 mod refresh;
+mod session;
 mod settings;
 mod usage;
 mod watch;
@@ -12,6 +13,7 @@ pub(crate) use ports::{
     FetchPolicy, HistoryRepository, HistoryRestore, SettingsRepository, UsageSource, WindowHistory,
 };
 pub(crate) use refresh::{RefreshCoordinator, RefreshDecision};
+pub(crate) use session::{LiveSession, SessionState};
 pub(crate) use settings::{Settings, SettingsApplication};
 pub(crate) use usage::{AgentInfo, AgentResult, RegisteredAgent, UsageApplication};
 pub(crate) use watch::{UsageSample, WatchPane, WatchState};
