@@ -359,6 +359,18 @@ mod tests {
         assert!(presentation::INDEX.contains("id=\"chrome-toggle\""));
         assert!(presentation::INDEX.contains("classList.toggle('chrome-hidden')"));
         assert!(
+            presentation::INDEX.contains(".chrome-hidden #panes { margin-block: auto; }"),
+            "chrome을 숨기면 데이터만 남으므로 화면 전체의 중앙에 놓아야 함.              justify-content 대신 auto margin이라야 내용이 화면보다 높을 때 위가 잘리지 않음"
+        );
+        assert!(
+            presentation::INDEX.contains("min-height: 100vh; min-height: 100dvh;"),
+            "모바일 동적 툴바까지 감안한 화면 높이여야 하고, dvh 미지원 브라우저에는 vh로 내려가야 함"
+        );
+        assert!(
+            presentation::INDEX.contains("padding-block: 10px;"),
+            "상하 padding이 비대칭이면 그 차이의 절반만큼 중앙에서 밀린다"
+        );
+        assert!(
             presentation::INDEX.contains("width: 44px; height: 44px"),
             "모바일 토글은 손가락으로 누를 수 있는 touch target이어야 함"
         );
