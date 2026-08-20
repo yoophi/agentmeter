@@ -5,6 +5,9 @@ mod application;
 mod bootstrap;
 mod domain;
 
+/// 화면에 보이는 버전. 개발 빌드는 `build.rs`가 커밋 해시를 붙인다.
+pub(crate) const VERSION: &str = env!("AGENTMETER_VERSION");
+
 /// 통합 CLI를 실행한다.
 pub fn run_agentmeter() -> std::process::ExitCode {
     adapters::inbound::runner::main_agentmeter()
