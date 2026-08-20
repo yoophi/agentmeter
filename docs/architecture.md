@@ -89,6 +89,12 @@ TOML 파싱과 파일 위치는 `FileSettingsRepository`가, `agents=claude,code
 
 ### 상주 상태
 
+`LiveSession`이 상주 조회 하나를 소유합니다 — `WatchState`, refresh gate, 다음 조회
+시각을 한 경계 안에 묶고, 화면은 그 상태를 읽고 요청만 보냅니다. 그래서 터미널과
+브라우저를 함께 띄워도 provider 조회는 화면 수와 무관하게 한 번만 나갑니다.
+조회를 언제 돌릴지(스레드 주기 / HTTP 요청)는 어댑터가 정하고, 세션은 무엇을 어떻게
+합칠지만 정합니다.
+
 `WatchState`가 이전 성공 값 보존, 최근 오류와 공급자별 상태를 관리합니다.
 `HistoryRepository` 포트는 raw 파일 작업 대신 활성 창 복원과 snapshot 기록이라는 lifecycle을
 제공합니다. 파일명·JSON·원자적 교체뿐 아니라 구형 ID 병합, scope 복원, 표본 용량 제한도
@@ -149,33 +155,42 @@ flowchart TD
     D -->|아니오| E[병렬 조회 후 plain 출력]
     D -->|예| F{stdout이 TTY인가?}
     F -->|아니오| E
-    F -->|예| G[워커 조회 + TUI 이벤트 루프]
+    F -->|예| G[LiveSession 조회 루프 + TUI 이벤트 루프]
 ```
 
-TUI의 네트워크 조회는 워커 스레드가 수행합니다. 메인 스레드는 키 입력과 렌더링을 계속
-처리하므로 원격 타임아웃 중에도 `q`, `r`, `R`에 반응합니다. application의
-`RefreshCoordinator`가 TUI와 웹의 공통 refresh state machine을 소유합니다. 조회 중 들어온
-요청은 하나로 합치고 `R`/Fresh 요청을 우선해 현재 조회 직후 한 번만 실행합니다. thread/channel과
-Tokio task는 각 adapter에 남습니다. 출력이 파이프나 `watch` 아래라면
-alternate screen을 사용할 수 없으므로 자동으로 1회 plain 출력으로 내려갑니다.
+네트워크 조회는 세션의 전용 스레드가 수행합니다. TUI 메인 스레드는 키 입력과 렌더링을
+계속 처리하므로 원격 타임아웃 중에도 `q`, `r`, `R`에 반응합니다 — 키 입력은 조회를
+직접 실행하지 않고 세션에 요청만 넣습니다. `RefreshCoordinator`가 TUI와 웹의 공통
+refresh state machine을 소유합니다. 조회 중 들어온 요청은 하나로 합치고 `R`/Fresh
+요청을 우선해 현재 조회 직후 한 번만 실행합니다. thread/channel과 Tokio task는 각
+adapter에 남습니다. 출력이 파이프나 `watch` 아래라면 alternate screen을 사용할 수 없으므로
+자동으로 1회 plain 출력으로 내려갑니다.
 
 웹 모드는 `agentmeter web`이라는 별도 인바운드 인터페이스를 사용합니다. Axum 서버는
 기본적으로 `127.0.0.1:0`에 바인딩하며 `--host`와 `--port`가 있으면 지정한 주소를
-사용해 Tokio 런타임에서 HTTP를 처리합니다. 기존 공급자 어댑터는
-동기 I/O이므로 `spawn_blocking`으로 격리해 HTTP executor를 막지 않습니다. background
-refresh가 `UsageApplication`과 `WatchState`를 갱신하고, HTTP handler는 presentation의
-웹 projection 결과만 JSON으로 반환합니다. window 시작·종료, SVG area path와 시간 marker
-좌표는 Rust projection이 계산하며 browser는 그리기와 server clock 기준 1초 countdown만
-담당합니다.
+사용해 Tokio 런타임에서 HTTP를 처리합니다. 서버는 백그라운드 스레드에서 돌고 바인딩된
+주소를 즉시 돌려주므로, 화면을 띄우기 전에 포트 충돌을 오류로 알 수 있습니다. 터미널을
+화면으로 쓸 수 있으면 같은 세션을 보는 TUI를 함께 띄우고 접속 주소를 헤더에 표시합니다.
+이때 서버는 stdout·stderr에 쓰지 않습니다 — alternate screen을 깨뜨리기 때문입니다.
+기존 공급자 어댑터는 동기 I/O이므로 `spawn_blocking`으로 격리해 HTTP executor를 막지
+않습니다. HTTP handler는 세션 상태를 읽어 presentation의 웹 projection 결과만 JSON으로
+반환합니다. window 시작·종료, SVG area path와 시간 marker 좌표는 Rust projection이
+계산하며 browser는 그리기와 server clock 기준 1초 countdown만 담당합니다.
 
 ```mermaid
 flowchart LR
     B[Browser] -->|GET /api/dashboard| AX[Axum inbound adapter]
     AX --> WP[web JSON projection]
-    BG[Tokio refresh task] --> RC[RefreshCoordinator]
-    RC -->|spawn_blocking| UA[UsageApplication]
+    T[TUI 이벤트 루프] -->|read| LS
+    T -->|r · R| LS
+    B -->|POST /api/refresh| AX
+    AX --> LS[LiveSession]
+    LOOP[조회 루프 스레드] --> LS
+    LS --> RC[RefreshCoordinator]
+    RC --> UA[UsageApplication]
     UA --> WS[WatchState]
     WS --> WP
+    WS --> T
     WP --> B
 ```
 

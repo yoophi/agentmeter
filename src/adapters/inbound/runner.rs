@@ -4,6 +4,8 @@ use std::io::{IsTerminal, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -12,7 +14,7 @@ use super::cli::{self, Cli};
 use super::web;
 use crate::adapters::presentation::{self, plain};
 use crate::application::{
-    AgentResult, FetchError, FetchPolicy, HistoryRepository, UsageApplication,
+    AgentResult, FetchError, FetchPolicy, HistoryRepository, LiveSession, UsageApplication,
 };
 use crate::bootstrap::{self, Runtime};
 use crate::domain::usage::UsageSnapshot;
@@ -128,6 +130,9 @@ fn selected_agent_names(
     }
 }
 
+/// 웹 서버는 배경에서 돌리고 터미널에는 상주 화면을 띄운다.
+///
+/// 두 화면이 같은 `LiveSession`을 보므로 provider 조회는 한 번만 나간다.
 fn web_command(arguments: WebArgs, runtime: Runtime, names: Vec<String>) -> Result<()> {
     if arguments.interval < cli::MIN_INTERVAL {
         eprintln!(
@@ -136,16 +141,43 @@ fn web_command(arguments: WebArgs, runtime: Runtime, names: Vec<String>) -> Resu
             cli::MIN_INTERVAL
         );
     }
-    web::run(web::Options {
-        application: runtime.usage,
-        history: runtime.history,
+    let agents = runtime.usage.info(&names)?;
+    let timezone = local_timezone();
+    let session = Arc::new(LiveSession::new(
+        runtime.usage,
         names,
-        timezone: local_timezone(),
-        interval_secs: arguments.interval_secs(),
+        agents,
+        runtime.history,
+        arguments.live,
+    ));
+    spawn_refresh_loop(&session, arguments.interval_secs());
+
+    // 터미널이 화면에 쓰이면 서버는 stdout·stderr를 건드릴 수 없다.
+    let with_screen = std::io::stdout().is_terminal();
+    let server = web::spawn(web::Options {
+        session: Arc::clone(&session),
+        timezone: timezone.clone(),
         port: arguments.port,
         host: arguments.host,
-        live: arguments.live,
-    })
+        quiet: with_screen,
+    })?;
+    let address = format!("http://{}", server.address());
+
+    if with_screen {
+        presentation::tui::run(MULTI_PROG, timezone, session, Some(address))?;
+        server.shutdown()
+    } else {
+        println!("{MULTI_PROG} web: {address}");
+        println!("종료하려면 Ctrl-C를 누르세요.");
+        server.wait()
+    }
+}
+
+/// 세션의 주기 조회를 전용 스레드에서 돌린다. 세션마다 한 번만 호출한다.
+fn spawn_refresh_loop(session: &Arc<LiveSession>, interval_secs: u64) {
+    let session = Arc::clone(session);
+    let interval = Duration::from_secs(interval_secs);
+    thread::spawn(move || session.run_refresh_loop(interval));
 }
 
 fn finish(
@@ -174,7 +206,7 @@ fn run(
     names: Vec<String>,
 ) -> Result<ExitCode> {
     // 이름 검증은 조회 전 애플리케이션 경계에서 한 번 수행한다.
-    application.info(&names)?;
+    let agents = application.info(&names)?;
     let stdout_is_tty = std::io::stdout().is_terminal();
     let timezone = local_timezone();
 
@@ -193,15 +225,15 @@ fn run(
                     cli::MIN_INTERVAL
                 );
             }
-            presentation::tui::run(
-                prog,
-                arguments.interval_secs(),
-                timezone,
+            let session = Arc::new(LiveSession::new(
                 application,
-                history,
                 names,
+                agents,
+                history,
                 arguments.live,
-            )?;
+            ));
+            spawn_refresh_loop(&session, arguments.interval_secs());
+            presentation::tui::run(prog, timezone, session, None)?;
             return Ok(ExitCode::SUCCESS);
         }
         eprintln!("{prog}: 출력이 터미널이 아니라 1회 출력합니다 (watch 와 함께 쓰세요)");

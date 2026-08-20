@@ -1,9 +1,7 @@
 //! 상주 모드 TUI. 조회 상태는 애플리케이션 계층이, 화면 투영은 이 모듈이 맡는다.
 
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Local;
@@ -14,10 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph, Sparkline};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::application::{
-    AgentResult, FetchPolicy, HistoryRepository, RefreshCoordinator, RefreshDecision,
-    UsageApplication, WatchPane, WatchState,
-};
+use crate::application::{LiveSession, SessionState, WatchPane};
 use crate::domain::usage::Severity;
 
 use super::history;
@@ -36,119 +31,57 @@ fn rows_for(meter: &Meter, has_chart: bool) -> usize {
         + 1
 }
 
-struct Round(Vec<AgentResult>);
-
-struct App {
-    prog: String,
-    timezone: String,
-    state: WatchState,
-    next_fetch: Option<Instant>,
-    interval: Duration,
+/// 한 프레임을 그리는 데 필요한 전부. 화면은 세션 상태를 읽기만 한다.
+struct Screen<'a> {
+    prog: &'a str,
+    timezone: &'a str,
+    /// 함께 뜬 웹 대시보드 주소. 없으면 배너를 그리지 않는다.
+    web: Option<&'a str>,
     label_panes: bool,
+    state: &'a SessionState,
 }
 
-impl App {
-    fn seconds_until_refresh(&self) -> Option<u64> {
-        Some(
-            self.next_fetch?
-                .saturating_duration_since(Instant::now())
-                .as_secs(),
-        )
-    }
-}
-
+/// 조회는 세션이 담당하므로 화면은 상태를 읽고 요청만 보낸다.
 pub(crate) fn run(
     prog: &str,
-    interval_secs: u64,
     timezone: String,
-    application: UsageApplication,
-    history: Arc<dyn HistoryRepository>,
-    names: Vec<String>,
-    live: bool,
+    session: Arc<LiveSession>,
+    web: Option<String>,
 ) -> Result<()> {
-    let interval = Duration::from_secs(interval_secs);
-    let (tx, rx) = mpsc::channel::<Round>();
-    let (request_tx, request_rx) = mpsc::channel::<FetchPolicy>();
-    let agents = application.info(&names)?;
-    let refresh = Arc::new(RefreshCoordinator::new(live));
-    let initial = match refresh.request(false) {
-        RefreshDecision::Execute(policy) => policy,
-        RefreshDecision::Queued => unreachable!("idle coordinator queues initial refresh"),
-    };
-
-    spawn_worker(
-        tx,
-        request_rx,
-        interval,
-        application,
-        names,
-        Arc::clone(&refresh),
-        initial,
-    );
-
-    let mut app = App {
-        prog: prog.to_string(),
-        timezone,
-        label_panes: agents.len() > 1,
-        state: WatchState::persistent(agents, history),
-        next_fetch: None,
-        interval,
-    };
-
+    let label_panes = session.read().watch.panes().len() > 1;
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &rx, &request_tx, &refresh);
+    let result = event_loop(
+        &mut terminal,
+        prog,
+        &timezone,
+        web.as_deref(),
+        label_panes,
+        &session,
+    );
     ratatui::restore();
     result
 }
 
-fn spawn_worker(
-    tx: Sender<Round>,
-    request_rx: Receiver<FetchPolicy>,
-    interval: Duration,
-    application: UsageApplication,
-    names: Vec<String>,
-    refresh: Arc<RefreshCoordinator>,
-    initial: FetchPolicy,
-) {
-    thread::spawn(move || {
-        let mut policy = initial;
-        loop {
-            let results = application.query(&names, policy).unwrap_or_default();
-            if tx.send(Round(results)).is_err() {
-                return;
-            }
-            if let Some(pending) = refresh.complete() {
-                policy = pending;
-                continue;
-            }
-            match request_rx.recv_timeout(interval) {
-                Ok(requested) => policy = requested,
-                Err(RecvTimeoutError::Timeout) => {
-                    policy = match refresh.request(false) {
-                        RefreshDecision::Execute(policy) => policy,
-                        RefreshDecision::Queued => continue,
-                    };
-                }
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        }
-    });
-}
-
 fn event_loop(
     terminal: &mut DefaultTerminal,
-    app: &mut App,
-    rx: &Receiver<Round>,
-    request_tx: &Sender<FetchPolicy>,
-    refresh: &RefreshCoordinator,
+    prog: &str,
+    timezone: &str,
+    web: Option<&str>,
+    label_panes: bool,
+    session: &LiveSession,
 ) -> Result<()> {
     loop {
-        while let Ok(round) = rx.try_recv() {
-            app.state.apply(round.0);
-            app.next_fetch = Some(Instant::now() + app.interval);
+        {
+            let state = session.read();
+            let screen = Screen {
+                prog,
+                timezone,
+                web,
+                label_panes,
+                state: &state,
+            };
+            terminal.draw(|frame| draw(frame, &screen))?;
         }
-
-        terminal.draw(|frame| draw(frame, app))?;
 
         if event::poll(TICK)?
             && let Event::Key(key) = event::read()?
@@ -160,10 +93,8 @@ fn event_loop(
                     return Ok(());
                 }
                 code => {
-                    if let Some(force_live) = refresh_request(code)
-                        && let RefreshDecision::Execute(policy) = refresh.request(force_live)
-                    {
-                        let _ = request_tx.send(policy);
+                    if let Some(force_live) = refresh_request(code) {
+                        session.request(force_live);
                     }
                 }
             }
@@ -179,50 +110,69 @@ fn refresh_request(code: KeyCode) -> Option<bool> {
     }
 }
 
-fn draw(frame: &mut Frame, app: &App) {
+/// 헤더는 기본 1줄 + 여백이고, 웹 배너가 있으면 한 줄 더 쓴다.
+fn header_height(screen: &Screen) -> u16 {
+    if screen.web.is_some() { 3 } else { 2 }
+}
+
+fn draw(frame: &mut Frame, screen: &Screen) {
     let full = frame.area();
     let canvas = Rect {
         width: full.width.saturating_sub(RIGHT_MARGIN),
         ..full
     };
-    let footer_height = if app.state.any_refresh_failed() { 2 } else { 1 };
+    let footer_height = if screen.state.watch.any_refresh_failed() {
+        2
+    } else {
+        1
+    };
     let [header, body, footer] = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(header_height(screen)),
         Constraint::Min(0),
         Constraint::Length(footer_height),
     ])
     .areas(canvas);
 
-    draw_header(frame, header, app);
-    draw_panes(frame, body, app);
-    draw_footer(frame, footer, app);
+    draw_header(frame, header, screen);
+    draw_panes(frame, body, screen);
+    draw_footer(frame, footer, screen);
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
+fn draw_header(frame: &mut Frame, area: Rect, screen: &Screen) {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!(" {}", screen.prog),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}", screen.timezone),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])];
+    if let Some(address) = screen.web {
+        lines.push(Line::from(vec![
+            Span::styled(" web 서버 실행 중", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!(" {}", app.prog),
-                Style::default().add_modifier(Modifier::BOLD),
+                format!("  {address}"),
+                Style::default()
+                    .fg(Color::Indexed(109))
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  {}", app.timezone),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ])),
-        area,
-    );
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_panes(frame: &mut Frame, area: Rect, app: &App) {
-    let count = app.state.panes().len().max(1);
+fn draw_panes(frame: &mut Frame, area: Rect, screen: &Screen) {
+    let panes = screen.state.watch.panes();
+    let count = panes.len().max(1);
     let columns: Vec<Constraint> = (0..count)
         .map(|_| Constraint::Ratio(1, count as u32))
         .collect();
     let slots = Layout::horizontal(columns).spacing(PANE_GAP).split(area);
 
-    for (pane, slot) in app.state.panes().iter().zip(slots.iter()) {
-        draw_pane(frame, *slot, pane, app);
+    for (pane, slot) in panes.iter().zip(slots.iter()) {
+        draw_pane(frame, *slot, pane, screen);
     }
 }
 
@@ -233,9 +183,9 @@ fn chart_of(pane: &WatchPane, meter: &Meter, area: Rect) -> Option<Vec<Option<u6
         .and_then(|window| history::chart(pane.samples(&meter.id, Some(window)), window, width))
 }
 
-fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, app: &App) {
+fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
     let mut area = area;
-    if app.label_panes {
+    if screen.label_panes {
         let [label, rest] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         frame.render_widget(
@@ -251,7 +201,7 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, app: &App) {
     let meters = pane
         .snapshot
         .as_ref()
-        .map(|snapshot| model::project(snapshot, &app.timezone, Local::now()))
+        .map(|snapshot| model::project(snapshot, screen.timezone, Local::now()))
         .unwrap_or_default();
 
     if meters.is_empty() {
@@ -370,21 +320,17 @@ fn gauge(bar: &Bar) -> Gauge<'_> {
         .label(bar.label.as_str())
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_footer(frame: &mut Frame, area: Rect, screen: &Screen) {
     let mut parts = Vec::new();
     let now = Local::now();
-    if let Some(origin) = app.state.oldest_origin(now) {
+    let panes = screen.state.watch.panes();
+    if let Some(origin) = screen.state.watch.oldest_origin(now) {
         parts.push(model::origin_text(origin, now));
     }
-    if let Some(seconds) = app.seconds_until_refresh() {
+    if let Some(seconds) = screen.state.seconds_until_refresh(now) {
         parts.push(format!("다음 {seconds}초"));
     }
-    let controls = if app
-        .state
-        .panes()
-        .iter()
-        .any(|pane| pane.agent.name == "claude")
-    {
+    let controls = if panes.iter().any(|pane| pane.agent.name == "claude") {
         "[r] 새로고침  [R] HTTP 조회  [q] 종료"
     } else {
         "[r] 새로고침  [q] 종료"
@@ -395,9 +341,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         format!(" {}", parts.join("  ·  ")),
         Style::default().fg(Color::DarkGray),
     ))];
-    let errors: Vec<String> = app
-        .state
-        .panes()
+    let errors: Vec<String> = panes
         .iter()
         .filter_map(|pane| {
             pane.snapshot.as_ref()?;
@@ -440,7 +384,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
-    use crate::application::{AgentInfo, FetchError};
+    use crate::application::{AgentInfo, AgentResult, FetchError, WatchState};
     use crate::domain::usage::{UsageLimit, UsageSnapshot};
 
     fn info(name: &'static str) -> AgentInfo {
@@ -487,9 +431,17 @@ mod tests {
         ]
     }
 
-    fn app_with(names: &[&'static str], with_data: bool) -> App {
+    fn state_of(watch: WatchState) -> SessionState {
+        SessionState {
+            watch,
+            refreshing: false,
+            next_refresh_at: None,
+        }
+    }
+
+    fn state_with(names: &[&'static str], with_data: bool) -> SessionState {
         let infos: Vec<_> = names.iter().map(|name| info(name)).collect();
-        let mut state = WatchState::new(infos.clone());
+        let mut watch = WatchState::new(infos.clone());
         if with_data {
             let results = infos
                 .iter()
@@ -498,16 +450,9 @@ mod tests {
                     result: Ok(UsageSnapshot::live(limits(), Local::now())),
                 })
                 .collect();
-            state.apply(results);
+            watch.apply(results);
         }
-        App {
-            prog: "agentmeter".into(),
-            timezone: "Asia/Seoul".into(),
-            label_panes: names.len() > 1,
-            state,
-            next_fetch: None,
-            interval: Duration::from_secs(60),
-        }
+        state_of(watch)
     }
 
     fn text(buffer: &Buffer) -> String {
@@ -527,15 +472,26 @@ mod tests {
             .join("\n")
     }
 
-    fn render(app: &App, width: u16, height: u16) -> String {
+    fn render_web(state: &SessionState, web: Option<&str>, width: u16, height: u16) -> String {
+        let screen = Screen {
+            prog: "agentmeter",
+            timezone: "Asia/Seoul",
+            web,
+            label_panes: state.watch.panes().len() > 1,
+            state,
+        };
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal.draw(|frame| draw(frame, &screen)).unwrap();
         text(terminal.backend().buffer())
+    }
+
+    fn render(state: &SessionState, width: u16, height: u16) -> String {
+        render_web(state, None, width, height)
     }
 
     #[test]
     fn renders_projected_domain_limits() {
-        let output = render(&app_with(&["claude"], true), 60, 24);
+        let output = render(&state_with(&["claude"], true), 60, 24);
         assert!(output.contains("Current session"));
         assert!(output.contains("Current week (Fable)"));
         assert!(output.contains("57% used"));
@@ -544,7 +500,7 @@ mod tests {
 
     #[test]
     fn multiple_panes_are_side_by_side() {
-        let output = render(&app_with(&["claude", "codex"], true), 160, 24);
+        let output = render(&state_with(&["claude", "codex"], true), 160, 24);
         let line = output
             .lines()
             .find(|line| line.contains("Claude Code"))
@@ -554,22 +510,22 @@ mod tests {
 
     #[test]
     fn error_is_visible_without_data() {
-        let mut app = app_with(&["claude"], false);
-        app.state.apply(vec![AgentResult {
+        let mut state = state_with(&["claude"], false);
+        state.watch.apply(vec![AgentResult {
             agent: info("claude"),
             result: Err(FetchError::Other(anyhow::anyhow!("재인증 필요"))),
         }]);
-        assert!(render(&app, 60, 24).contains("재인증 필요"));
+        assert!(render(&state, 60, 24).contains("재인증 필요"));
     }
 
     #[test]
     fn stale_data_and_refresh_failure_are_both_visible() {
-        let mut app = app_with(&["claude"], true);
-        app.state.apply(vec![AgentResult {
+        let mut state = state_with(&["claude"], true);
+        state.watch.apply(vec![AgentResult {
             agent: info("claude"),
             result: Err(FetchError::Other(anyhow::anyhow!("HTTP 429"))),
         }]);
-        let output = render(&app, 60, 24);
+        let output = render(&state, 60, 24);
         assert!(output.contains("Current session"));
         assert!(output.contains("갱신 실패"));
         assert!(output.contains("HTTP 429"));
@@ -577,10 +533,11 @@ mod tests {
 
     #[test]
     fn short_and_narrow_terminals_do_not_panic() {
-        let app = app_with(&["claude", "codex"], true);
+        let state = state_with(&["claude", "codex"], true);
         for width in [40, 60, 80] {
             for height in 3..=12 {
-                let _ = render(&app, width, height);
+                let _ = render(&state, width, height);
+                let _ = render_web(&state, Some("http://127.0.0.1:8080"), width, height);
             }
         }
     }
@@ -588,23 +545,15 @@ mod tests {
     #[test]
     fn history_is_rendered_after_two_application_updates() {
         let infos = vec![info("claude")];
-        let mut state = WatchState::new(infos.clone());
+        let mut watch = WatchState::new(infos.clone());
         for offset in [2, 1] {
             let at = Local::now() - TimeDelta::minutes(offset);
-            state.apply(vec![AgentResult {
+            watch.apply(vec![AgentResult {
                 agent: infos[0],
                 result: Ok(UsageSnapshot::live(limits(), at)),
             }]);
         }
-        let app = App {
-            prog: "agentmeter".into(),
-            timezone: "Asia/Seoul".into(),
-            label_panes: false,
-            state,
-            next_fetch: None,
-            interval: Duration::from_secs(60),
-        };
-        assert!(render(&app, 80, 30).contains('·'));
+        assert!(render(&state_of(watch), 80, 30).contains('·'));
     }
 
     #[test]
@@ -615,6 +564,47 @@ mod tests {
 
     #[test]
     fn claude_footer_advertises_http_refresh() {
-        assert!(render(&app_with(&["claude"], true), 100, 30).contains("[R] HTTP 조회"));
+        assert!(render(&state_with(&["claude"], true), 100, 30).contains("[R] HTTP 조회"));
+    }
+
+    #[test]
+    fn the_web_banner_shows_that_the_server_runs_and_where() {
+        let state = state_with(&["claude"], true);
+        let output = render_web(&state, Some("http://127.0.0.1:54321"), 80, 30);
+        let banner = output
+            .lines()
+            .find(|line| line.contains("web 서버 실행 중"))
+            .expect("웹 배너가 상단에 있어야 함");
+        assert!(banner.contains("http://127.0.0.1:54321"), "{banner}");
+        let rows: Vec<&str> = output.lines().collect();
+        assert!(rows[0].contains("agentmeter"), "{:?}", rows[0]);
+        assert_eq!(rows[1], banner, "배너는 헤더 둘째 줄이어야 함");
+    }
+
+    #[test]
+    fn without_a_server_the_header_keeps_its_original_height() {
+        let state = state_with(&["claude"], true);
+        let plain = render(&state, 80, 30);
+        assert!(!plain.contains("web 서버"));
+        let first_meter = plain
+            .lines()
+            .position(|line| line.contains("Current session"))
+            .unwrap();
+        let with_banner = render_web(&state, Some("http://127.0.0.1:1"), 80, 30);
+        let shifted = with_banner
+            .lines()
+            .position(|line| line.contains("Current session"))
+            .unwrap();
+        assert_eq!(shifted, first_meter + 1, "배너는 본문을 한 줄만 밀어야 함");
+    }
+
+    #[test]
+    fn the_footer_counts_down_to_the_next_session_refresh() {
+        let mut state = state_with(&["claude"], true);
+        // 남은 시간은 초 단위로 절삭되므로 경계에 걸리지 않게 여유를 준다.
+        state.next_refresh_at =
+            Some(Local::now() + TimeDelta::seconds(42) + TimeDelta::milliseconds(900));
+        let output = render(&state, 100, 30);
+        assert!(output.contains("다음 42초"), "{output}");
     }
 }
