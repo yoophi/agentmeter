@@ -93,8 +93,9 @@ agents = ["claude", "codex", "kiro"]
 
 가로축은 창 전체(세션 5시간 / 주간 7일)라 바로 위 시간 게이지와 축이 같고,
 수집하지 않은 구간은 `·` placeholder로 비어 있습니다. 제목 옆 `+3%p`는 현재 창의
-첫 표본 이후 늘어난 양입니다. 실측 표본은 `~/.cache/agentmeter/history/` 아래의
-공급자·창별 JSON에 저장되며, 재실행해도 같은 5시간/7일 창의 기록을 복원합니다.
+첫 표본 이후 늘어난 양입니다. 실측 표본은 `~/.cache/agentmeter/history.sqlite3`에
+저장되며, 재실행해도 같은 사용량 창의 기록을 복원합니다. 이전 버전의
+`~/.cache/agentmeter/history/*.json`은 첫 조회 때 자동으로 한 번 가져오고 원본은 보존합니다.
 
 출력이 터미널이 아니면(파이프, `watch` 아래) 자동으로 1회 출력으로 내려갑니다.
 전체 화면 TUI 는 alternate screen 을 쓰기 때문에 `watch` 안에서는 동작할 수 없습니다.
