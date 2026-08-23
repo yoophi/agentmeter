@@ -144,6 +144,18 @@ impl FileHistoryRepository {
         connection: &mut Connection,
         provider: &str,
     ) -> anyhow::Result<Vec<String>> {
+        let completed = connection
+            .query_row(
+                "SELECT 1 FROM legacy_migrations WHERE provider = ?1",
+                [provider],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("legacy migration 상태 조회 실패")?
+            .is_some();
+        if completed {
+            return Ok(Vec::new());
+        }
         let Some(root) = &self.legacy_root else {
             return Ok(Vec::new());
         };
@@ -229,6 +241,13 @@ impl FileHistoryRepository {
             transaction
                 .commit()
                 .context("legacy history import commit 실패")?;
+        }
+        if warnings.is_empty() {
+            connection.execute(
+                "INSERT OR REPLACE INTO legacy_migrations(provider, completed_at)
+                 VALUES (?1, unixepoch())",
+                [provider],
+            )?;
         }
         Ok(warnings)
     }
@@ -370,6 +389,10 @@ fn initialize(connection: &Connection) -> anyhow::Result<()> {
          CREATE TABLE IF NOT EXISTS legacy_imports (
              path TEXT PRIMARY KEY,
              imported_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS legacy_migrations (
+             provider TEXT PRIMARY KEY,
+             completed_at INTEGER NOT NULL
          );",
     )?;
     if version == 0 {
@@ -932,6 +955,12 @@ mod tests {
             .query_row("SELECT count(*) FROM legacy_imports", [], |row| row.get(0))
             .unwrap();
         assert_eq!(imports, 1);
+        let completed: i64 = database
+            .query_row("SELECT count(*) FROM legacy_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(completed, 1);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1233,6 +1262,16 @@ mod tests {
         );
         repository.record("claude", &snapshot).unwrap();
         std::fs::write(root.join("claude__5H__broken__window.json"), "not json").unwrap();
+
+        // 아직 migration이 완료되지 않은 업그레이드 상태를 만든다.
+        Connection::open(root.join(DATABASE_FILE))
+            .unwrap()
+            .execute(
+                "DELETE FROM legacy_migrations WHERE provider = 'claude'",
+                [],
+            )
+            .unwrap();
+        let repository = Arc::new(FileHistoryRepository::at(root.clone()));
 
         let state = WatchState::persistent(
             vec![AgentInfo {
