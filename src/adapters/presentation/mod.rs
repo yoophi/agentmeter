@@ -81,6 +81,21 @@ fn to_json(snapshot: &UsageSnapshot, timezone: &str) -> anyhow::Result<String> {
         window_elapsed_percent: Option<f64>,
         /// `1 hour 12 minutes left`
         time_left: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quota: Option<Quota<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quota_summary: Option<&'a str>,
+    }
+    #[derive(serde::Serialize)]
+    struct Quota<'a> {
+        used: f64,
+        limit: f64,
+        remaining: f64,
+        unit: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        overage_enabled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        safe_daily_budget: Option<f64>,
     }
     #[derive(serde::Serialize)]
     struct Out<'a> {
@@ -102,6 +117,15 @@ fn to_json(snapshot: &UsageSnapshot, timezone: &str) -> anyhow::Result<String> {
             footnote: m.footnote.as_deref(),
             window_elapsed_percent: m.time.as_ref().map(|t| pct(t.fill_clamped())),
             time_left: m.time.as_ref().map(|t| t.label.as_str()),
+            quota: m.quota.as_ref().map(|quota| Quota {
+                used: quota.used,
+                limit: quota.limit,
+                remaining: quota.remaining(),
+                unit: &quota.unit,
+                overage_enabled: quota.overage_enabled,
+                safe_daily_budget: m.safe_daily_budget,
+            }),
+            quota_summary: m.quota_summary.as_deref(),
         })
         .collect();
     let out = Out {
@@ -139,5 +163,31 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["source"], "live");
         assert_eq!(value["limits"][0]["level"], "warning");
+    }
+
+    #[test]
+    fn json_exposes_raw_quota_when_the_provider_has_it() {
+        use crate::domain::usage::UsageQuota;
+
+        let limit = UsageLimit::new(
+            "monthly:credits",
+            Some("KIRO POWER".into()),
+            2.5,
+            None,
+            true,
+            Some(chrono::TimeDelta::days(31)),
+            None,
+        )
+        .with_quota(UsageQuota::new(250.0, 10_000.0, "credits"));
+        let value: serde_json::Value = serde_json::from_str(
+            &to_json(
+                &UsageSnapshot::live(vec![limit], chrono::Local::now()),
+                "Asia/Seoul",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["limits"][0]["quota"]["remaining"], 9750.0);
+        assert_eq!(value["limits"][0]["quota"]["unit"], "credits");
     }
 }

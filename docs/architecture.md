@@ -27,7 +27,7 @@ flowchart LR
 - `src/adapters/outbound/claude/` — Claude 캐시, 자격증명, HTTP 어댑터
 - `src/adapters/outbound/codex/` — Codex app-server JSONL 어댑터
 - `src/adapters/outbound/config.rs` — TOML 설정 저장소
-- `src/adapters/outbound/history.rs` — 한도 창별 JSON 히스토리 저장소
+- `src/adapters/outbound/history.rs` — SQLite 히스토리 저장소와 구형 JSON import
 - `src/adapters/presentation/` — 화면 모델 투영, plain·TUI·JSON 출력
 - `src/bootstrap.rs` — 구체 어댑터를 포트에 연결하는 유일한 composition root
 - `src/bin/` — 공개 실행 함수 하나만 호출하는 얇은 프로세스 진입점
@@ -96,11 +96,11 @@ TOML 파싱과 파일 위치는 `FileSettingsRepository`가, `agents=claude,code
 합칠지만 정합니다.
 
 `WatchState`가 이전 성공 값 보존, 최근 오류와 공급자별 상태를 관리합니다.
-`HistoryRepository` 포트는 raw 파일 작업 대신 활성 창 복원과 snapshot 기록이라는 lifecycle을
-제공합니다. 파일명·JSON·원자적 교체뿐 아니라 구형 ID 병합, scope 복원, 표본 용량 제한도
+`HistoryRepository` 포트는 raw 저장 작업 대신 활성 창 복원과 snapshot 기록이라는 lifecycle을
+제공합니다. SQLite schema, transaction, 구형 JSON 자동 import, 구형 ID 병합과 scope 복원을
 아웃바운드 어댑터 안에 숨깁니다. 시작할 때 현재 시각을 포함하는 활성 창을 먼저 복원하므로
-첫 원격 조회가 실패해도 저장된 5시간/7일 값과 오류를 함께 표시합니다. 파일 하나가
-손상되어도 정상 창은 부분 복원하고 경고를 함께 표시합니다.
+첫 원격 조회가 실패해도 저장된 값과 오류를 함께 표시합니다. 손상된 구형 JSON이 있어도
+정상 데이터는 부분 복원하고 경고를 함께 표시합니다.
 
 ```mermaid
 stateDiagram-v2

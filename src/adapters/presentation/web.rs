@@ -42,6 +42,21 @@ pub(crate) struct Meter {
     pub reset: Option<String>,
     pub window: Option<Window>,
     pub chart: Chart,
+    pub quota_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota: Option<Quota>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct Quota {
+    pub used: f64,
+    pub limit: f64,
+    pub remaining: f64,
+    pub unit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overage_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safe_daily_budget: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +110,15 @@ pub(crate) fn project(
                                     .window
                                     .map(|window| project_chart(samples, window))
                                     .unwrap_or_default(),
+                                quota_summary: meter.quota_summary,
+                                quota: meter.quota.map(|quota| Quota {
+                                    used: quota.used,
+                                    limit: quota.limit,
+                                    remaining: quota.remaining(),
+                                    unit: quota.unit,
+                                    overage_enabled: quota.overage_enabled,
+                                    safe_daily_budget: meter.safe_daily_budget,
+                                }),
                             }
                         })
                         .collect()

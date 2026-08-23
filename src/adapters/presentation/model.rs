@@ -3,7 +3,7 @@
 use chrono::{DateTime, Local, TimeDelta};
 
 use crate::domain::usage::{
-    LimitId, Origin, OriginKind, Severity, UsageLimit, UsageSnapshot, UsageWindow,
+    LimitId, Origin, OriginKind, Severity, UsageLimit, UsageQuota, UsageSnapshot, UsageWindow,
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +31,9 @@ pub(crate) struct Meter {
     pub time: Option<Bar>,
     pub footnote: Option<String>,
     pub emphasized: bool,
+    pub quota: Option<UsageQuota>,
+    pub safe_daily_budget: Option<f64>,
+    pub quota_summary: Option<String>,
 }
 
 pub(crate) fn project(
@@ -52,6 +55,17 @@ fn project_limit(limit: &UsageLimit, timezone: &str, now: DateTime<Local>) -> Me
         (None, Some(_)) => Some(pending_bar()),
         _ => None,
     };
+    let safe_daily_budget = match (&limit.quota, limit.resets_at) {
+        (Some(quota), Some(reset)) if reset > now => {
+            let days = (reset - now).num_days().max(1) as f64;
+            Some(quota.remaining() / days)
+        }
+        _ => None,
+    };
+    let quota_summary = limit
+        .quota
+        .as_ref()
+        .map(|quota| quota_summary(quota, safe_daily_budget));
     Meter {
         id: limit.id.clone(),
         title: window_title(duration_minutes, limit.scope.as_deref()),
@@ -64,6 +78,48 @@ fn project_limit(limit: &UsageLimit, timezone: &str, now: DateTime<Local>) -> Me
         time,
         footnote: limit.resets_at.map(|reset| resets_text(reset, timezone)),
         emphasized: limit.active,
+        quota: limit.quota.clone(),
+        safe_daily_budget,
+        quota_summary,
+    }
+}
+
+fn quota_summary(quota: &UsageQuota, safe_daily_budget: Option<f64>) -> String {
+    let mut parts = vec![format!(
+        "{} / {} {} · {} left",
+        format_amount(quota.used),
+        format_amount(quota.limit),
+        quota.unit,
+        format_amount(quota.remaining()),
+    )];
+    if let Some(budget) = safe_daily_budget {
+        parts.push(format!("daily budget {}/day", format_amount(budget)));
+    }
+    if let Some(enabled) = quota.overage_enabled {
+        parts.push(format!(
+            "Overages {}",
+            if enabled { "enabled" } else { "disabled" }
+        ));
+    }
+    parts.join(" · ")
+}
+
+fn format_amount(value: f64) -> String {
+    let fixed = format!("{value:.2}");
+    let trimmed = fixed.trim_end_matches('0').trim_end_matches('.');
+    let (whole, fraction) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    let mut grouped = String::new();
+    for (index, ch) in whole.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    let whole: String = grouped.chars().rev().collect();
+    if fraction.is_empty() {
+        whole
+    } else {
+        format!("{whole}.{fraction}")
     }
 }
 
@@ -188,6 +244,9 @@ mod tests {
             Some("Resets Aug 20 at 9:00pm (Asia/Seoul)")
         );
         assert!(meter.emphasized);
+        assert!(meter.quota.is_none());
+        assert!(meter.safe_daily_budget.is_none());
+        assert!(meter.quota_summary.is_none());
     }
 
     #[test]
@@ -223,5 +282,29 @@ mod tests {
         let meter = &project(&snapshot, "Asia/Seoul", now())[0];
         assert_eq!(meter.usage.fill, 0.0);
         assert_eq!(meter.time.as_ref().unwrap().fill, 0.0);
+    }
+
+    #[test]
+    fn numeric_quota_is_shown_as_credits_and_remaining_balance() {
+        let limit = limit(Some(TimeDelta::days(31)), Some(now() + TimeDelta::days(8)))
+            .with_quota(UsageQuota::new(271.77, 10_000.0, "credits"));
+        let snapshot = UsageSnapshot::live(vec![limit], now());
+        let meter = &project(&snapshot, "Asia/Seoul", now())[0];
+        assert_eq!(meter.usage.label, "75% used");
+        assert!(meter.safe_daily_budget.is_some());
+        assert!(
+            meter
+                .quota_summary
+                .as_deref()
+                .unwrap()
+                .contains("271.77 / 10,000 credits")
+        );
+        assert!(
+            meter
+                .quota_summary
+                .as_deref()
+                .unwrap()
+                .contains("daily budget")
+        );
     }
 }

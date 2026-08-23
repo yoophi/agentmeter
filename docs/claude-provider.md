@@ -94,11 +94,10 @@ flowchart TD
 ### 창별 히스토리
 
 TUI가 수집한 사용률은 실제 측정 시각을 기준으로
-`~/.cache/agentmeter/history/` 아래에 저장합니다. 5시간 세션과 7일 한도는 각각
-`claude__5H__YYYYMMDDHHMMSS__YYYYMMDDHHMMSS.json`,
-`claude__7D__YYYYMMDDHHMMSS__YYYYMMDDHHMMSS.json` 파일을 사용합니다.
-재실행 시 길이와 리셋 시각이 모두 같은 파일만 복원하므로 이전 한도 창의 사용률이
-현재 차트나 변화량에 섞이지 않습니다.
+`~/.cache/agentmeter/history.sqlite3`에 저장합니다. provider, 창 길이, reset 시각,
+limit ID와 측정 분을 복합 키로 사용하므로 이전 한도 창의 사용률이 현재 차트나 변화량에
+섞이지 않습니다. 구형 `history/*.json` 파일은 SQLite에 한 번 자동으로 가져오며 원본은
+삭제하지 않습니다.
 
 ## 응답 형태
 

@@ -1,37 +1,43 @@
-//! 한도 창별 사용률 표본을 JSON 파일로 보존한다.
+//! 한도 창별 사용률 표본을 SQLite에 보존하고 구형 JSON을 자동으로 가져온다.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use chrono::{Local, TimeZone};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::application::{HistoryRepository, HistoryRestore, UsageSample, WindowHistory};
-use crate::domain::usage::{LimitId, Origin, UsageLimit, UsageSnapshot, UsageWindow};
+use crate::domain::usage::{LimitId, Origin, UsageLimit, UsageQuota, UsageSnapshot, UsageWindow};
 
 const FILE_VERSION: u8 = 1;
+const DATABASE_VERSION: i64 = 1;
+const DATABASE_FILE: &str = "history.sqlite3";
 
 #[derive(Debug, Clone)]
 pub(crate) struct FileHistoryRepository {
-    root: Option<PathBuf>,
+    database: Option<PathBuf>,
+    legacy_root: Option<PathBuf>,
 }
 
 impl FileHistoryRepository {
     pub(crate) fn production() -> Self {
-        let root = std::env::var_os("HOME")
+        let base = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|home| home.join(".cache/agentmeter/history"));
-        Self { root }
+            .map(|home| home.join(".cache/agentmeter"));
+        Self {
+            database: base.as_ref().map(|base| base.join(DATABASE_FILE)),
+            legacy_root: base.map(|base| base.join("history")),
+        }
     }
 
     #[cfg(test)]
     fn at(root: PathBuf) -> Self {
-        Self { root: Some(root) }
-    }
-
-    fn path(&self, provider: &str, window: UsageWindow) -> Option<PathBuf> {
-        Some(self.root.as_ref()?.join(file_name(provider, window)))
+        Self {
+            database: Some(root.join(DATABASE_FILE)),
+            legacy_root: Some(root),
+        }
     }
 }
 
@@ -64,6 +70,38 @@ impl StoredWindow {
 struct StoredLimit {
     scope: Option<String>,
     active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quota_used: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quota_limit: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quota_unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overage_enabled: Option<bool>,
+}
+
+impl StoredLimit {
+    fn from_limit(limit: &UsageLimit) -> Self {
+        Self {
+            scope: limit.scope.clone(),
+            active: limit.active,
+            quota_used: limit.quota.as_ref().map(|quota| quota.used),
+            quota_limit: limit.quota.as_ref().map(|quota| quota.limit),
+            quota_unit: limit.quota.as_ref().map(|quota| quota.unit.clone()),
+            overage_enabled: limit.quota.as_ref().and_then(|quota| quota.overage_enabled),
+        }
+    }
+
+    fn quota(&self) -> Option<UsageQuota> {
+        Some(
+            UsageQuota::new(
+                self.quota_used?,
+                self.quota_limit?,
+                self.quota_unit.clone()?,
+            )
+            .with_overage(self.overage_enabled),
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,25 +121,52 @@ struct LoadedHistory {
 }
 
 impl FileHistoryRepository {
-    fn load_active_files(
+    fn open(&self, provider: &str) -> anyhow::Result<Option<(Connection, Vec<String>)>> {
+        let Some(path) = &self.database else {
+            return Ok(None);
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("{} 생성 실패", parent.display()))?;
+        }
+        let mut connection =
+            Connection::open(path).with_context(|| format!("{} 열기 실패", path.display()))?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("SQLite busy timeout 설정 실패")?;
+        initialize(&connection)?;
+        let warnings = self.migrate_legacy(&mut connection, provider)?;
+        Ok(Some((connection, warnings)))
+    }
+
+    fn migrate_legacy(
         &self,
+        connection: &mut Connection,
         provider: &str,
-        at: chrono::DateTime<Local>,
-    ) -> anyhow::Result<(Vec<LoadedHistory>, Vec<String>)> {
-        let Some(root) = &self.root else {
-            return Ok((Vec::new(), Vec::new()));
+    ) -> anyhow::Result<Vec<String>> {
+        let completed = connection
+            .query_row(
+                "SELECT 1 FROM legacy_migrations WHERE provider = ?1",
+                [provider],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("legacy migration 상태 조회 실패")?
+            .is_some();
+        if completed {
+            return Ok(Vec::new());
+        }
+        let Some(root) = &self.legacy_root else {
+            return Ok(Vec::new());
         };
         let entries = match std::fs::read_dir(root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((Vec::new(), Vec::new()));
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
-                return Err(error).with_context(|| format!("{} 읽기 실패", root.display()));
+                return Ok(vec![format!("{} 읽기 실패: {error}", root.display())]);
             }
         };
         let prefix = format!("{}__", safe_provider(provider));
-        let mut active = Vec::new();
         let mut warnings = Vec::new();
         for entry in entries {
             let path = match entry {
@@ -115,8 +180,21 @@ impl FileHistoryRepository {
                 continue;
             };
             if !name.starts_with(&prefix)
-                || path.extension().and_then(|ext| ext.to_str()) != Some("json")
+                || path.extension().and_then(|extension| extension.to_str()) != Some("json")
             {
+                continue;
+            }
+            let key = path.to_string_lossy();
+            let imported = connection
+                .query_row(
+                    "SELECT 1 FROM legacy_imports WHERE path = ?1",
+                    [key.as_ref()],
+                    |_| Ok(()),
+                )
+                .optional()
+                .context("legacy import 상태 조회 실패")?
+                .is_some();
+            if imported {
                 continue;
             }
             let raw = match std::fs::read_to_string(&path) {
@@ -133,10 +211,6 @@ impl FileHistoryRepository {
                     continue;
                 }
             };
-            let Some(window) = file.window.to_window() else {
-                warnings.push(format!("{} window 값이 올바르지 않음", path.display()));
-                continue;
-            };
             if file.version != FILE_VERSION {
                 warnings.push(format!(
                     "{} 지원하지 않는 version {}",
@@ -145,29 +219,73 @@ impl FileHistoryRepository {
                 ));
                 continue;
             }
-            if at < window.started_at() || at >= window.resets_at {
+            if file.window.to_window().is_none() {
+                warnings.push(format!("{} window 값이 올바르지 않음", path.display()));
                 continue;
             }
+            let transaction = connection
+                .transaction()
+                .context("legacy history import transaction 시작 실패")?;
+            store_window(
+                &transaction,
+                provider,
+                file.window,
+                &file.series,
+                &file.limits,
+                false,
+            )?;
+            transaction.execute(
+                "INSERT INTO legacy_imports(path, imported_at) VALUES (?1, unixepoch())",
+                [key.as_ref()],
+            )?;
+            transaction
+                .commit()
+                .context("legacy history import commit 실패")?;
+        }
+        if warnings.is_empty() {
+            connection.execute(
+                "INSERT OR REPLACE INTO legacy_migrations(provider, completed_at)
+                 VALUES (?1, unixepoch())",
+                [provider],
+            )?;
+        }
+        Ok(warnings)
+    }
+
+    fn load_active_files(
+        &self,
+        provider: &str,
+        at: chrono::DateTime<Local>,
+    ) -> anyhow::Result<(Vec<LoadedHistory>, Vec<String>)> {
+        let Some((connection, warnings)) = self.open(provider)? else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let minute = at.timestamp().div_euclid(60);
+        let mut statement = connection.prepare(
+            "SELECT duration_minutes, resets_at_minute
+             FROM windows
+             WHERE provider = ?1
+               AND ?2 >= resets_at_minute - duration_minutes
+               AND ?2 < resets_at_minute
+             ORDER BY duration_minutes, resets_at_minute",
+        )?;
+        let stored: Vec<StoredWindow> = statement
+            .query_map(params![provider, minute], |row| {
+                Ok(StoredWindow {
+                    duration_minutes: row.get(0)?,
+                    resets_at_minute: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut active = Vec::new();
+        for stored in stored {
+            let Some(window) = stored.to_window() else {
+                continue;
+            };
             active.push(LoadedHistory {
                 window,
-                series: file
-                    .series
-                    .into_iter()
-                    .map(|(id, points)| (LimitId::new(id), points))
-                    .collect(),
-                limits: file
-                    .limits
-                    .into_iter()
-                    .map(|(id, limit)| {
-                        (
-                            LimitId::new(id),
-                            StoredLimit {
-                                scope: limit.scope,
-                                active: limit.active,
-                            },
-                        )
-                    })
-                    .collect(),
+                series: load_series(&connection, provider, stored)?,
+                limits: load_limits(&connection, provider, stored)?,
             });
         }
         Ok((active, warnings))
@@ -178,28 +296,10 @@ impl FileHistoryRepository {
         provider: &str,
         window: UsageWindow,
     ) -> anyhow::Result<BTreeMap<LimitId, Vec<UsageSample>>> {
-        let Some(path) = self.path(provider, window) else {
+        let Some((connection, _)) = self.open(provider)? else {
             return Ok(BTreeMap::new());
         };
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(BTreeMap::new());
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("{} 읽기 실패", path.display()));
-            }
-        };
-        let file: HistoryFile =
-            serde_json::from_str(&raw).with_context(|| format!("{} 파싱 실패", path.display()))?;
-        if file.version != FILE_VERSION || file.window != StoredWindow::from(window) {
-            return Ok(BTreeMap::new());
-        }
-        Ok(file
-            .series
-            .into_iter()
-            .map(|(id, points)| (LimitId::new(id), points))
-            .collect())
+        load_series(&connection, provider, StoredWindow::from(window))
     }
 
     fn save(
@@ -209,40 +309,232 @@ impl FileHistoryRepository {
         series: &BTreeMap<LimitId, Vec<UsageSample>>,
         limits: &[UsageLimit],
     ) -> anyhow::Result<()> {
-        let Some(root) = &self.root else {
+        let Some((mut connection, _)) = self.open(provider)? else {
             return Ok(());
         };
-        std::fs::create_dir_all(root).with_context(|| format!("{} 생성 실패", root.display()))?;
-        let path = self.path(provider, window).expect("HOME 이 있는 저장소");
-        let file = HistoryFile {
-            version: FILE_VERSION,
-            window: StoredWindow::from(window),
-            series: series
-                .iter()
-                .map(|(id, points)| (id.as_str().to_string(), points.clone()))
-                .collect(),
-            limits: limits
-                .iter()
-                .filter(|limit| belongs_to_window(limit, window))
-                .map(|limit| {
-                    (
-                        limit.id.as_str().to_string(),
-                        StoredLimit {
-                            scope: limit.scope.clone(),
-                            active: limit.active,
-                        },
-                    )
-                })
-                .collect(),
-        };
-        let bytes = serde_json::to_vec(&file).context("히스토리 직렬화 실패")?;
-        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-        std::fs::write(&temporary, bytes)
-            .with_context(|| format!("{} 임시 저장 실패", temporary.display()))?;
-        std::fs::rename(&temporary, &path)
-            .with_context(|| format!("{} 교체 실패", path.display()))?;
+        let series: BTreeMap<String, Vec<UsageSample>> = series
+            .iter()
+            .map(|(id, points)| (id.as_str().to_string(), points.clone()))
+            .collect();
+        let metadata = limits
+            .iter()
+            .filter(|limit| belongs_to_window(limit, window))
+            .map(|limit| {
+                (
+                    limit.id.as_str().to_string(),
+                    StoredLimit::from_limit(limit),
+                )
+            })
+            .collect();
+        let transaction = connection.transaction()?;
+        store_window(
+            &transaction,
+            provider,
+            StoredWindow::from(window),
+            &series,
+            &metadata,
+            true,
+        )?;
+        transaction.commit()?;
         Ok(())
     }
+}
+
+fn initialize(connection: &Connection) -> anyhow::Result<()> {
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version > DATABASE_VERSION {
+        bail!(
+            "history database version {version}은 이 agentmeter가 지원하는 {DATABASE_VERSION}보다 새 버전입니다"
+        );
+    }
+    connection.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;
+         CREATE TABLE IF NOT EXISTS windows (
+             provider TEXT NOT NULL,
+             duration_minutes INTEGER NOT NULL,
+             resets_at_minute INTEGER NOT NULL,
+             PRIMARY KEY(provider, duration_minutes, resets_at_minute)
+         );
+         CREATE TABLE IF NOT EXISTS limits (
+             provider TEXT NOT NULL,
+             duration_minutes INTEGER NOT NULL,
+             resets_at_minute INTEGER NOT NULL,
+             limit_id TEXT NOT NULL,
+             scope TEXT,
+             active INTEGER NOT NULL,
+             quota_used REAL,
+             quota_limit REAL,
+             quota_unit TEXT,
+             overage_enabled INTEGER,
+             PRIMARY KEY(provider, duration_minutes, resets_at_minute, limit_id),
+             FOREIGN KEY(provider, duration_minutes, resets_at_minute)
+                 REFERENCES windows(provider, duration_minutes, resets_at_minute)
+                 ON DELETE CASCADE
+         );
+         CREATE TABLE IF NOT EXISTS samples (
+             provider TEXT NOT NULL,
+             duration_minutes INTEGER NOT NULL,
+             resets_at_minute INTEGER NOT NULL,
+             limit_id TEXT NOT NULL,
+             minute INTEGER NOT NULL,
+             percent REAL NOT NULL,
+             PRIMARY KEY(provider, duration_minutes, resets_at_minute, limit_id, minute),
+             FOREIGN KEY(provider, duration_minutes, resets_at_minute)
+                 REFERENCES windows(provider, duration_minutes, resets_at_minute)
+                 ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS samples_by_window
+             ON samples(provider, duration_minutes, resets_at_minute, minute);
+         CREATE TABLE IF NOT EXISTS legacy_imports (
+             path TEXT PRIMARY KEY,
+             imported_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS legacy_migrations (
+             provider TEXT PRIMARY KEY,
+             completed_at INTEGER NOT NULL
+         );",
+    )?;
+    if version == 0 {
+        connection.pragma_update(None, "user_version", DATABASE_VERSION)?;
+    }
+    Ok(())
+}
+
+fn store_window(
+    transaction: &Transaction<'_>,
+    provider: &str,
+    window: StoredWindow,
+    series: &BTreeMap<String, Vec<UsageSample>>,
+    limits: &BTreeMap<String, StoredLimit>,
+    replace: bool,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO windows(provider, duration_minutes, resets_at_minute)
+         VALUES (?1, ?2, ?3)",
+        params![provider, window.duration_minutes, window.resets_at_minute],
+    )?;
+    if replace {
+        transaction.execute(
+            "DELETE FROM samples
+             WHERE provider = ?1 AND duration_minutes = ?2 AND resets_at_minute = ?3",
+            params![provider, window.duration_minutes, window.resets_at_minute],
+        )?;
+        transaction.execute(
+            "DELETE FROM limits
+             WHERE provider = ?1 AND duration_minutes = ?2 AND resets_at_minute = ?3",
+            params![provider, window.duration_minutes, window.resets_at_minute],
+        )?;
+    }
+    for (id, metadata) in limits {
+        transaction.execute(
+            "INSERT INTO limits(
+                 provider, duration_minutes, resets_at_minute, limit_id, scope, active,
+                 quota_used, quota_limit, quota_unit, overage_enabled
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(provider, duration_minutes, resets_at_minute, limit_id)
+             DO UPDATE SET
+                 scope = excluded.scope,
+                 active = excluded.active,
+                 quota_used = COALESCE(excluded.quota_used, limits.quota_used),
+                 quota_limit = COALESCE(excluded.quota_limit, limits.quota_limit),
+                 quota_unit = COALESCE(excluded.quota_unit, limits.quota_unit),
+                 overage_enabled = COALESCE(excluded.overage_enabled, limits.overage_enabled)",
+            params![
+                provider,
+                window.duration_minutes,
+                window.resets_at_minute,
+                id,
+                metadata.scope,
+                metadata.active,
+                metadata.quota_used,
+                metadata.quota_limit,
+                metadata.quota_unit,
+                metadata.overage_enabled,
+            ],
+        )?;
+    }
+    for (id, points) in series {
+        for point in points {
+            transaction.execute(
+                "INSERT INTO samples(
+                     provider, duration_minutes, resets_at_minute, limit_id, minute, percent
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(provider, duration_minutes, resets_at_minute, limit_id, minute)
+                 DO UPDATE SET percent = excluded.percent",
+                params![
+                    provider,
+                    window.duration_minutes,
+                    window.resets_at_minute,
+                    id,
+                    point.minute,
+                    point.percent,
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn load_series(
+    connection: &Connection,
+    provider: &str,
+    window: StoredWindow,
+) -> anyhow::Result<BTreeMap<LimitId, Vec<UsageSample>>> {
+    let mut statement = connection.prepare(
+        "SELECT limit_id, minute, percent
+         FROM samples
+         WHERE provider = ?1 AND duration_minutes = ?2 AND resets_at_minute = ?3
+         ORDER BY limit_id, minute",
+    )?;
+    let rows = statement.query_map(
+        params![provider, window.duration_minutes, window.resets_at_minute],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                UsageSample {
+                    minute: row.get(1)?,
+                    percent: row.get(2)?,
+                },
+            ))
+        },
+    )?;
+    let mut series = BTreeMap::<LimitId, Vec<UsageSample>>::new();
+    for row in rows {
+        let (id, sample) = row?;
+        series.entry(LimitId::new(id)).or_default().push(sample);
+    }
+    Ok(series)
+}
+
+fn load_limits(
+    connection: &Connection,
+    provider: &str,
+    window: StoredWindow,
+) -> anyhow::Result<BTreeMap<LimitId, StoredLimit>> {
+    let mut statement = connection.prepare(
+        "SELECT limit_id, scope, active, quota_used, quota_limit, quota_unit, overage_enabled
+         FROM limits
+         WHERE provider = ?1 AND duration_minutes = ?2 AND resets_at_minute = ?3
+         ORDER BY limit_id",
+    )?;
+    let rows = statement.query_map(
+        params![provider, window.duration_minutes, window.resets_at_minute],
+        |row| {
+            Ok((
+                LimitId::new(row.get::<_, String>(0)?),
+                StoredLimit {
+                    scope: row.get(1)?,
+                    active: row.get(2)?,
+                    quota_used: row.get(3)?,
+                    quota_limit: row.get(4)?,
+                    quota_unit: row.get(5)?,
+                    overage_enabled: row.get(6)?,
+                },
+            ))
+        },
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 impl HistoryRepository for FileHistoryRepository {
@@ -276,6 +568,7 @@ impl HistoryRepository for FileHistoryRepository {
                         .and_then(|limit| limit.scope.clone())
                         .or_else(|| infer_scope(id)),
                     active: metadata.is_some_and(|limit| limit.active),
+                    quota: metadata.and_then(StoredLimit::quota),
                 };
                 if candidates
                     .get(id)
@@ -324,15 +617,7 @@ impl HistoryRepository for FileHistoryRepository {
                 .limits
                 .iter()
                 .filter(|limit| belongs_to_window(limit, window))
-                .map(|limit| {
-                    (
-                        limit.id.clone(),
-                        StoredLimit {
-                            scope: limit.scope.clone(),
-                            active: limit.active,
-                        },
-                    )
-                })
+                .map(|limit| (limit.id.clone(), StoredLimit::from_limit(limit)))
                 .collect();
             merge_legacy_series(&mut series, window, &mut metadata);
             for limit in snapshot
@@ -360,6 +645,7 @@ struct RestoredLimit {
     window: UsageWindow,
     scope: Option<String>,
     active: bool,
+    quota: Option<UsageQuota>,
 }
 
 fn restored_snapshot(candidates: BTreeMap<LimitId, RestoredLimit>) -> Option<UsageSnapshot> {
@@ -371,7 +657,7 @@ fn restored_snapshot(candidates: BTreeMap<LimitId, RestoredLimit>) -> Option<Usa
     let limits = candidates
         .into_iter()
         .map(|(id, candidate)| {
-            UsageLimit::new(
+            let limit = UsageLimit::new(
                 id.as_str(),
                 candidate.scope,
                 candidate.sample.percent,
@@ -379,7 +665,11 @@ fn restored_snapshot(candidates: BTreeMap<LimitId, RestoredLimit>) -> Option<Usa
                 candidate.active,
                 Some(candidate.window.duration),
                 Some(candidate.window.resets_at),
-            )
+            );
+            match candidate.quota {
+                Some(quota) => limit.with_quota(quota),
+                None => limit,
+            }
         })
         .collect();
     Some(UsageSnapshot {
@@ -463,6 +753,10 @@ fn merge_legacy_series(
         limits.entry(target.clone()).or_insert_with(|| StoredLimit {
             scope: infer_scope(&target),
             active: false,
+            quota_used: None,
+            quota_limit: None,
+            quota_unit: None,
+            overage_enabled: None,
         });
         let legacy = series.remove(legacy_id).unwrap_or_default();
         let stable = series.remove(&target).unwrap_or_default();
@@ -515,6 +809,7 @@ fn legacy_scope(title: &str, window: UsageWindow) -> Option<Option<String>> {
     Some((scope != "all models").then(|| scope.to_string()))
 }
 
+#[cfg(test)]
 fn file_name(provider: &str, window: UsageWindow) -> String {
     let stored = StoredWindow::from(window);
     let duration = match stored.duration_minutes {
@@ -545,6 +840,7 @@ fn safe_provider(provider: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn minute_as_local(minute: i64) -> chrono::DateTime<Local> {
     Local
         .timestamp_opt(minute * 60, 0)
@@ -603,6 +899,102 @@ mod tests {
             ..window(5)
         };
         assert!(repository.load("claude", later).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_json_is_imported_once_without_deleting_the_source() {
+        let root = std::env::temp_dir().join(format!(
+            "agentmeter-json-migration-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let repository = FileHistoryRepository::at(root.clone());
+        let now = Local::now();
+        let active = UsageWindow {
+            resets_at: now + TimeDelta::hours(1),
+            duration: TimeDelta::hours(5),
+        };
+        let minute = now.timestamp().div_euclid(60);
+        let legacy = HistoryFile {
+            version: FILE_VERSION,
+            window: StoredWindow::from(active),
+            series: BTreeMap::from([(
+                "session:all".to_string(),
+                vec![UsageSample {
+                    minute,
+                    percent: 42.0,
+                }],
+            )]),
+            limits: BTreeMap::from([(
+                "session:all".to_string(),
+                StoredLimit {
+                    scope: None,
+                    active: true,
+                    quota_used: None,
+                    quota_limit: None,
+                    quota_unit: None,
+                    overage_enabled: None,
+                },
+            )]),
+        };
+        let legacy_path = root.join(file_name("claude", active));
+        std::fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        for _ in 0..2 {
+            let restored = repository.restore_active("claude", now).unwrap();
+            assert_eq!(
+                restored.windows[0].series[&LimitId::new("session:all")].len(),
+                1
+            );
+        }
+        assert!(legacy_path.exists(), "legacy source remains recoverable");
+        let database = Connection::open(root.join(DATABASE_FILE)).unwrap();
+        let imports: i64 = database
+            .query_row("SELECT count(*) FROM legacy_imports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(imports, 1);
+        let completed: i64 = database
+            .query_row("SELECT count(*) FROM legacy_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(completed, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_credit_quota_survives_a_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "agentmeter-quota-history-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let repository = FileHistoryRepository::at(root.clone());
+        let now = Local::now();
+        let monthly = UsageWindow {
+            resets_at: now + TimeDelta::days(8),
+            duration: TimeDelta::days(31),
+        };
+        let limit = UsageLimit::new(
+            "monthly:credits",
+            Some("KIRO POWER".into()),
+            2.5,
+            None,
+            true,
+            Some(monthly.duration),
+            Some(monthly.resets_at),
+        )
+        .with_quota(UsageQuota::new(250.0, 10_000.0, "credits"));
+        repository
+            .record("kiro", &UsageSnapshot::live(vec![limit], now))
+            .unwrap();
+
+        let restored = repository.restore_active("kiro", now).unwrap();
+        let quota = restored.snapshot.unwrap().limits[0].quota.clone().unwrap();
+        assert_eq!(quota.used, 250.0);
+        assert_eq!(quota.remaining(), 9750.0);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -870,6 +1262,16 @@ mod tests {
         );
         repository.record("claude", &snapshot).unwrap();
         std::fs::write(root.join("claude__5H__broken__window.json"), "not json").unwrap();
+
+        // 아직 migration이 완료되지 않은 업그레이드 상태를 만든다.
+        Connection::open(root.join(DATABASE_FILE))
+            .unwrap()
+            .execute(
+                "DELETE FROM legacy_migrations WHERE provider = 'claude'",
+                [],
+            )
+            .unwrap();
+        let repository = Arc::new(FileHistoryRepository::at(root.clone()));
 
         let state = WatchState::persistent(
             vec![AgentInfo {
