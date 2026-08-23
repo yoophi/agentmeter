@@ -44,6 +44,15 @@ Codex 의 `/status` 는 남은 비율(`71% left`)로 표시하지만, 여기서�
 
 ## 사용법
 
+### 설치
+
+Homebrew tap으로 설치하고 이후 릴리스도 `brew upgrade`로 받을 수 있습니다.
+
+```bash
+brew install yoophi/tap/agentmeter
+brew upgrade agentmeter
+```
+
 ### agentmeter
 
 ```bash
