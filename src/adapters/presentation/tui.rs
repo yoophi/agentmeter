@@ -27,6 +27,7 @@ const HISTORY_CHART_HEIGHT: usize = 3;
 fn rows_for(meter: &Meter, has_chart: bool) -> usize {
     2 + usize::from(meter.time.is_some())
         + if has_chart { HISTORY_CHART_HEIGHT } else { 0 }
+        + usize::from(meter.quota_summary.is_some())
         + usize::from(meter.footnote.is_some())
         + 1
 }
@@ -302,6 +303,17 @@ fn draw_one(
         row += HISTORY_CHART_HEIGHT;
     }
 
+    if let Some(summary) = &meter.quota_summary {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                summary.as_str(),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            indent(slots[row], GAUGE_INDENT),
+        );
+        row += 1;
+    }
+
     if let Some(note) = &meter.footnote {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -330,8 +342,11 @@ fn draw_footer(frame: &mut Frame, area: Rect, screen: &Screen) {
     if let Some(seconds) = screen.state.seconds_until_refresh(now) {
         parts.push(format!("다음 {seconds}초"));
     }
-    let controls = if panes.iter().any(|pane| pane.agent.name == "claude") {
-        "[r] 새로고침  [R] HTTP 조회  [q] 종료"
+    let controls = if panes
+        .iter()
+        .any(|pane| matches!(pane.agent.name, "claude" | "kiro"))
+    {
+        "[r] 새로고침  [R] 직접 조회  [q] 종료"
     } else {
         "[r] 새로고침  [q] 종료"
     };
@@ -563,8 +578,9 @@ mod tests {
     }
 
     #[test]
-    fn claude_footer_advertises_http_refresh() {
-        assert!(render(&state_with(&["claude"], true), 100, 30).contains("[R] HTTP 조회"));
+    fn cached_providers_advertise_direct_refresh() {
+        assert!(render(&state_with(&["claude"], true), 100, 30).contains("[R] 직접 조회"));
+        assert!(render(&state_with(&["kiro"], true), 100, 30).contains("[R] 직접 조회"));
     }
 
     #[test]

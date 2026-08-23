@@ -55,6 +55,38 @@ pub struct UsageLimit {
     pub active: bool,
     pub window_duration: Option<TimeDelta>,
     pub resets_at: Option<DateTime<Local>>,
+    pub quota: Option<UsageQuota>,
+}
+
+/// 공급자가 숫자로 공개하는 사용량과 총 한도.
+///
+/// 퍼센트만 제공하는 공급자도 있으므로 `UsageLimit`에서는 선택값이다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageQuota {
+    pub used: f64,
+    pub limit: f64,
+    pub unit: String,
+    pub overage_enabled: Option<bool>,
+}
+
+impl UsageQuota {
+    pub fn new(used: f64, limit: f64, unit: impl Into<String>) -> Self {
+        Self {
+            used: used.max(0.0),
+            limit: limit.max(0.0),
+            unit: unit.into(),
+            overage_enabled: None,
+        }
+    }
+
+    pub fn with_overage(mut self, enabled: Option<bool>) -> Self {
+        self.overage_enabled = enabled;
+        self
+    }
+
+    pub fn remaining(&self) -> f64 {
+        (self.limit - self.used).max(0.0)
+    }
 }
 
 impl UsageLimit {
@@ -80,7 +112,13 @@ impl UsageLimit {
             active,
             window_duration,
             resets_at,
+            quota: None,
         }
+    }
+
+    pub fn with_quota(mut self, quota: UsageQuota) -> Self {
+        self.quota = Some(quota);
+        self
     }
 
     pub fn used_fraction(&self) -> f64 {
@@ -185,5 +223,11 @@ mod tests {
         let origin = Origin::cache(at(7), false);
         assert_eq!(origin.age_seconds(at(9)), 7200);
         assert_eq!(origin.age_seconds(at(6)), 0);
+    }
+
+    #[test]
+    fn quota_never_reports_a_negative_remaining_amount() {
+        let quota = UsageQuota::new(12.5, 10.0, "credits");
+        assert_eq!(quota.remaining(), 0.0);
     }
 }

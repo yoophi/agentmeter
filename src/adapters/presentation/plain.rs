@@ -77,6 +77,9 @@ fn render_one(m: &Meter, color: bool, gauge_width: usize) -> String {
     if let Some(time) = &m.time {
         s.push_str(&render_bar(time, color, gauge_width));
     }
+    if let Some(summary) = &m.quota_summary {
+        s.push_str(&format!("  {mu}{summary}{r}\n"));
+    }
     if let Some(note) = &m.footnote {
         s.push_str(&format!("  {mu}{note}{r}\n"));
     }
@@ -268,6 +271,9 @@ mod tests {
             time: None,
             footnote: Some("Resets Aug 18 at 9:29pm (Asia/Seoul)".into()),
             emphasized,
+            quota: None,
+            safe_daily_budget: None,
+            quota_summary: None,
         }
     }
 

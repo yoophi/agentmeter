@@ -7,6 +7,7 @@ use crate::adapters::outbound::claude::source::ClaudeUsageSource;
 use crate::adapters::outbound::codex::source::CodexUsageSource;
 use crate::adapters::outbound::config::FileSettingsRepository;
 use crate::adapters::outbound::history::FileHistoryRepository;
+use crate::adapters::outbound::kiro::source::KiroUsageSource;
 use crate::application::{
     AgentInfo, HistoryRepository, RegisteredAgent, SettingsApplication, UsageApplication,
 };
@@ -34,6 +35,13 @@ pub(crate) fn production() -> anyhow::Result<Runtime> {
                 display: "Codex",
             },
             CodexUsageSource,
+        ),
+        RegisteredAgent::new(
+            AgentInfo {
+                name: "kiro",
+                display: "Kiro",
+            },
+            KiroUsageSource::default(),
         ),
     ])?;
 

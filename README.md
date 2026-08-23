@@ -1,7 +1,7 @@
 # agentmeter
 
 코딩 에이전트의 사용 한도를 같은 형식으로 보여주는 CLI입니다. 설정한 에이전트들을
-한 화면에 나란히 표시하거나 `--agent`로 Claude Code 또는 Codex 하나만 선택할 수 있습니다.
+한 화면에 나란히 표시하거나 `--agent`로 Claude Code, Codex 또는 Kiro 하나만 선택할 수 있습니다.
 
 각 도구의 `/usage`·`/status` 가 보여주는 것과 같은 값 — 한도 소진율과 리셋 시각 — 을
 터미널에서 바로 확인하거나 상주시켜 둘 수 있습니다.
@@ -29,7 +29,7 @@ $ agentmeter --agent codex
   기준 21:25 (방금, 직접 조회)
 ```
 
-두 provider는 같은 게이지와 같은 문구를 씁니다.
+모든 provider는 같은 게이지와 같은 문구를 씁니다.
 리셋 시각은 오늘이든 아니든 항상 날짜를 붙입니다 — 시각만 있으면 화면만 보고
 오늘인지 내일인지 알 수 없습니다.
 Codex 의 `/status` 는 남은 비율(`71% left`)로 표시하지만, 여기서는 Claude와 맞춰
@@ -50,6 +50,7 @@ Codex 의 `/status` 는 남은 비율(`71% left`)로 표시하지만, 여기서�
 agentmeter                              # 설정한 에이전트를 모두 조회
 agentmeter --agent claude               # 설정과 관계없이 Claude Code만 조회
 agentmeter --agent codex --json         # 설정과 관계없이 Codex만 JSON 출력
+agentmeter --agent kiro                  # Kiro 월간 credit과 잔여량 표시
 agentmeter --agent claude --watch        # Claude Code만 상주 모드로 표시
 agentmeter -w                           # 상주 모드 (좌우 분할)
 agentmeter --json                        # 에이전트별 키를 가진 JSON
@@ -68,16 +69,16 @@ agentmeter config set agents=claude,codex   # 표시할 에이전트 지정
 (`XDG_CONFIG_HOME` 을 존중합니다).
 
 ```toml
-agents = ["claude", "codex"]
+agents = ["claude", "codex", "kiro"]
 ```
 
 순서가 화면 순서입니다. 파일이 없으면 등록된 에이전트를 모두 보여줍니다.
 모르는 이름을 넣으면 **저장하기 전에** 거절합니다.
-`--agent claude` 또는 `--agent codex`를 지정하면 설정 파일을 읽지 않고 이번 실행에만
+`--agent claude`, `--agent codex` 또는 `--agent kiro`를 지정하면 설정 파일을 읽지 않고 이번 실행에만
 해당 에이전트를 표시합니다. 설정 파일의 `agents` 값은 변경하지 않습니다.
 
-상주 모드에서 `r`은 캐시 우선 즉시 새로고침, `R`은 Claude 캐시와 백오프를
-건너뛴 HTTP 직접 조회, `q`는 종료입니다. 직접 조회가 실패하면 직전 값과 실제 오류를
+상주 모드에서 `r`은 캐시 우선 즉시 새로고침, `R`은 provider 캐시와 백오프를
+건너뛴 직접 조회, `q`는 종료입니다. 직접 조회가 실패하면 직전 값과 실제 오류를
 함께 표시합니다.
 
 상주 모드는 조회할 때마다 사용률을 분 단위로 기록해 3행 Sparkline으로 보여줍니다.
@@ -180,9 +181,21 @@ codex app-server generate-json-schema --out ./schema
 
 자세한 내용은 [Codex app-server 연동](docs/codex-provider.md)을 보세요.
 
+### Kiro
+
+로그인된 공식 CLI에서 `kiro-cli chat --no-interactive "/usage"`를 실행해 월간 구독
+credit을 조회합니다. 인증 파일이나 비공개 management API를 직접 읽지 않습니다.
+`KIRO_BIN`으로 실행 파일 경로를 바꿀 수 있습니다.
+
+사용량 게이지와 함께 사용 credit, 전체 한도, 잔여 credit, reset 시각, reset 전까지의
+safe daily budget을 표시합니다. 상주 모드에서는 기본 갱신 주기가 더 짧더라도 Kiro CLI
+조회 결과를 5분 동안 재사용합니다. `R`을 누르거나 `--live`를 지정하면 캐시를 건너뜁니다.
+
+자세한 내용은 [Kiro CLI 연동](docs/kiro-provider.md)을 보세요.
+
 ### 로컬 로그를 쓰지 않는 이유
 
-두 provider 모두 로컬 로그(`~/.claude/projects/**/*.jsonl` 등)를 집계하지 **않습니다.**
+provider의 로컬 대화 로그(`~/.claude/projects/**/*.jsonl`, `~/.kiro/sessions/` 등)는 집계하지 **않습니다.**
 로컬 로그에는 그 기기에서 쓴 기록만 남지만 한도는 계정 단위로 합산되므로,
 다른 컴퓨터나 웹에서 쓴 양이 빠져 항상 실제보다 낮게 나옵니다.
 서버가 판정한 값을 그대로 받아오는 편이 정확합니다.
@@ -202,8 +215,9 @@ Claude provider가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본
 - Claude provider가 쓰는 `/api/oauth/usage` 는 **공개 문서가 없는 내부 엔드포인트**입니다.
   Anthropic 이 언제든 응답 형태를 바꾸거나 없앨 수 있습니다.
 - Codex provider가 쓰는 app-server는 Codex가 `[experimental]`로 표시한 인터페이스입니다.
+- Kiro provider는 사람이 보는 `/usage` 텍스트를 파싱하므로 CLI 출력 형식 변경의 영향을 받을 수 있습니다.
 
-그래서 양쪽 모두 개별 필드를 하드코딩하지 않고, 서버가 정규화해 둔 목록
+그래서 Claude와 Codex는 개별 필드를 하드코딩하지 않고, 서버가 정규화해 둔 목록
 (`limits` / `rateLimitsByLimitId`)을 순회합니다. 항목이 늘거나 처음 보는 종류가 와도
 그대로 표시되며 죽지 않습니다.
 
@@ -213,6 +227,7 @@ Claude provider가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본
 - [docs/architecture-review.html](docs/architecture-review.html) — 헥사고날 아키텍처 전체 리뷰
 - [Claude 조회 정책](docs/claude-provider.md) — 캐시 우선 조회, 자격증명, 429 대응
 - [Codex app-server 연동](docs/codex-provider.md) — app-server 프로토콜, 응답 처리
+- [Kiro CLI 연동](docs/kiro-provider.md) — credit 수집, 캐시, JSON 출력
 - [docs/web-dashboard.md](docs/web-dashboard.md) — 로컬 서버, 갱신 흐름, JSON projection
 
 ## 아키텍처

@@ -97,7 +97,7 @@
     .area-fill { fill: rgba(121, 153, 154, .72); }
     .area-line { fill: none; stroke: var(--accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
     .dot { fill: var(--normal); }
-    .reset { display: block; min-height: var(--text-row); color: var(--muted); }
+    .quota-summary, .reset { display: block; min-height: var(--text-row); color: var(--muted); }
     footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 2px; color: var(--muted); font-size: 9.68px; }
     .error-toast {
       position: fixed; left: 50%; bottom: 24px; z-index: 10;
@@ -173,6 +173,7 @@
           <path class="area-fill"></path><path class="area-line"></path>
         </svg>
       </div>
+      <span class="quota-summary"></span>
       <span class="reset"></span>
     </section>
   </template>
@@ -266,6 +267,9 @@
         timeBar.dataset.resetsAt = meter.window.resets_at;
       }
       node.querySelector('.reset').textContent = meter.reset || '';
+      const quotaSummary = node.querySelector('.quota-summary');
+      quotaSummary.textContent = meter.quota_summary || '';
+      quotaSummary.hidden = !meter.quota_summary;
       chart(node.querySelector('svg'), meter);
       return node;
     }
