@@ -70,7 +70,10 @@
     .status-dot.busy { background: var(--warning); animation: pulse 1s infinite; }
     .status-dot.offline { background: var(--critical); }
     @keyframes pulse { 50% { opacity: .35; } }
-    #panes { display: grid; grid-template-columns: repeat(var(--pane-count, 1), minmax(0, 1fr)); gap: 48px; }
+    #panes { display: grid; gap: 48px; }
+    #panes[data-pane-count="1"] { grid-template-columns: minmax(0, 1fr); }
+    #panes[data-pane-count="2"],
+    #panes[data-pane-count="3"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .pane { min-width: 0; }
     .pane-head { display: flex; justify-content: space-between; align-items: baseline; padding: 0 0 2px; }
     .pane-name { font-size: 15.84px; font-weight: 750; }
@@ -118,8 +121,12 @@
       header { align-items: flex-start; flex-direction: column; gap: 4px; }
       .actions { justify-content: flex-start; }
     }
+    /* 1240px에서 shell 1204px, gap 제외 pane당 약 369px를 확보한다. */
+    @media (min-width: 1240px) {
+      #panes[data-pane-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
     @media (max-width: 600px) {
-      #panes { grid-template-columns: 1fr; }
+      #panes[data-pane-count] { grid-template-columns: minmax(0, 1fr); }
     }
     @media (max-width: 520px) {
       .shell { width: min(100% - 20px, 1680px); padding-top: 10px; }
@@ -279,7 +286,7 @@
       const generatedAt = new Date(data.generated_at).getTime();
       if (Number.isFinite(generatedAt)) serverClockOffset = generatedAt - Date.now();
       panes.replaceChildren();
-      panes.style.setProperty('--pane-count', Math.min(data.panes.length || 1, 2));
+      panes.dataset.paneCount = Math.min(data.panes.length || 1, 3);
       for (const pane of data.panes) {
         const node = paneTemplate.content.firstElementChild.cloneNode(true);
         node.querySelector('.pane-name').textContent = pane.display;

@@ -350,6 +350,15 @@ mod tests {
         assert!(presentation::INDEX.contains("--chart-rows: 3"));
         assert!(presentation::INDEX.contains("calc(var(--text-row) * var(--chart-rows))"));
         assert!(presentation::INDEX.contains("@media (max-width: 600px)"));
+        assert!(presentation::INDEX.contains("@media (min-width: 1240px)"));
+        assert!(
+            presentation::INDEX
+                .contains("#panes[data-pane-count=\"3\"] { grid-template-columns: repeat(3")
+        );
+        assert!(
+            presentation::INDEX.contains("Math.min(data.panes.length || 1, 3)"),
+            "세 provider를 모두 받은 경우 3-pane layout을 선택해야 함"
+        );
         assert!(presentation::INDEX.contains("setInterval(tickCountdowns, 1000)"));
         assert!(presentation::INDEX.contains("class=\"time-fill\""));
         assert!(presentation::INDEX.contains("elapsed * 100"));
