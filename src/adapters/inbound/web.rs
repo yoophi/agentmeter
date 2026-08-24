@@ -380,6 +380,10 @@ mod tests {
             "상하 padding이 비대칭이면 그 차이의 절반만큼 중앙에서 밀린다"
         );
         assert!(
+            presentation::INDEX.contains("stroke-linecap: round"),
+            "표본이 하나뿐인 구간은 길이 0 subpath로 나가므로 round cap이라야 점으로 보인다"
+        );
+        assert!(
             presentation::INDEX.contains("width: 44px; height: 44px"),
             "모바일 토글은 손가락으로 누를 수 있는 touch target이어야 함"
         );
