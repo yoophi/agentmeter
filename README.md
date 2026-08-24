@@ -363,6 +363,10 @@ agentmeter는 zero-padding 없는 CalVer 형식인 `YYYY.M.#`로 버전을 관�
 예를 들어 2026년 8월의 첫 번째 릴리스는 `2026.8.1`, 두 번째 릴리스는
 `2026.8.2`입니다.
 
+## 라이선스
+
+[MIT License](LICENSE)
+
 ## 설치
 
 ```bash
