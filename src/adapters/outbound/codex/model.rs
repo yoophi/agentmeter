@@ -78,6 +78,9 @@ const LONG_WINDOW_MIN_MINS: i64 = 24 * 60;
 pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
     let mut out = Vec::new();
     for snap in resp.snapshots() {
+        let base_id = snap.limit_id.as_deref().unwrap_or("codex");
+        let mut has_five_hour_window = false;
+        let mut has_long_window = false;
         for w in [snap.primary.as_ref(), snap.secondary.as_ref()] {
             let Some(w) = w else { continue };
             let Some(mins) = w.window_duration_mins else {
@@ -86,7 +89,8 @@ pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
             if mins != FIVE_HOUR_MINS && mins <= LONG_WINDOW_MIN_MINS {
                 continue;
             }
-            let base_id = snap.limit_id.as_deref().unwrap_or("codex");
+            has_five_hour_window |= mins == FIVE_HOUR_MINS;
+            has_long_window |= mins > LONG_WINDOW_MIN_MINS;
             out.push(UsageLimit::new(
                 format!("{base_id}:{mins}"),
                 snap.limit_name.clone(),
@@ -97,20 +101,15 @@ pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
                 w.resets_at_local(),
             ));
         }
+        if !has_five_hour_window && has_long_window && snap.limit_name.is_some() {
+            out.push(empty_five_hour_limit(base_id, snap.limit_name.clone()));
+        }
     }
     if !out
         .iter()
         .any(|limit| limit.window_duration == Some(chrono::TimeDelta::minutes(FIVE_HOUR_MINS)))
     {
-        out.push(UsageLimit::new(
-            format!("codex:{FIVE_HOUR_MINS}"),
-            None,
-            0.0,
-            None,
-            false,
-            Some(chrono::TimeDelta::minutes(FIVE_HOUR_MINS)),
-            None,
-        ));
+        out.push(empty_five_hour_limit("codex", None));
     }
     out.sort_by(|left, right| {
         left.window_duration
@@ -119,6 +118,18 @@ pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
             .then_with(|| left.id.cmp(&right.id))
     });
     out
+}
+
+fn empty_five_hour_limit(base_id: &str, scope: Option<String>) -> UsageLimit {
+    UsageLimit::new(
+        format!("{base_id}:{FIVE_HOUR_MINS}"),
+        scope,
+        0.0,
+        None,
+        false,
+        Some(chrono::TimeDelta::minutes(FIVE_HOUR_MINS)),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -261,6 +272,31 @@ mod tests {
         assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::hours(5)));
         assert_eq!(limits[0].used_percent, 0.0);
         assert!(limits[0].resets_at.is_none());
+    }
+
+    #[test]
+    fn keeps_scoped_five_hour_window_when_only_scoped_week_is_returned() {
+        let body = r#"{
+          "rateLimits":{"limitId":"codex",
+            "primary":{"usedPercent":20,"windowDurationMins":10080}},
+          "rateLimitsByLimitId":{
+            "codex":{"limitId":"codex",
+              "primary":{"usedPercent":20,"windowDurationMins":10080}},
+            "codex_bengalfox":{"limitId":"codex_bengalfox",
+              "limitName":"GPT-5.3-Codex-Spark",
+              "primary":{"usedPercent":0,"windowDurationMins":10080}}
+          }
+        }"#;
+        let response: RateLimitsResponse = serde_json::from_str(body).unwrap();
+        let limits = to_limits(&response);
+        let session = limits
+            .iter()
+            .find(|limit| limit.window_duration == Some(chrono::TimeDelta::hours(5)))
+            .expect("빈 5시간 창도 남아야 함");
+        assert_eq!(session.id.as_str(), "codex_bengalfox:300");
+        assert_eq!(session.scope.as_deref(), Some("GPT-5.3-Codex-Spark"));
+        assert_eq!(session.used_percent, 0.0);
+        assert!(session.resets_at.is_none());
     }
 
     /// 리셋 시각이 있으면 남은 시간 게이지가 붙는다.
