@@ -1,6 +1,6 @@
 //! 한도 창별 사용률 표본을 SQLite에 보존하고 구형 JSON을 자동으로 가져온다.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -282,11 +282,13 @@ impl FileHistoryRepository {
             let Some(window) = stored.to_window() else {
                 continue;
             };
-            active.push(LoadedHistory {
+            let mut history = LoadedHistory {
                 window,
                 series: load_series(&connection, provider, stored)?,
                 limits: load_limits(&connection, provider, stored)?,
-            });
+            };
+            normalize_deprecated_codex_ids(provider, &mut history.series, &mut history.limits);
+            active.push(history);
         }
         Ok((active, warnings))
     }
@@ -299,7 +301,9 @@ impl FileHistoryRepository {
         let Some((connection, _)) = self.open(provider)? else {
             return Ok(BTreeMap::new());
         };
-        load_series(&connection, provider, StoredWindow::from(window))
+        let mut series = load_series(&connection, provider, StoredWindow::from(window))?;
+        normalize_deprecated_codex_ids(provider, &mut series, &mut BTreeMap::new());
+        Ok(series)
     }
 
     fn save(
@@ -694,6 +698,53 @@ fn belongs_to_window(limit: &UsageLimit, window: UsageWindow) -> bool {
         .is_some_and(|candidate| StoredWindow::from(candidate) == StoredWindow::from(window))
 }
 
+/// 예전 Codex ID의 `primary`·`secondary` 위치를 제거한다.
+///
+/// app-server는 새 창을 추가하면서 기존 주간 창을 다른 slot으로 옮길 수 있다.
+/// 창의 실제 정체성은 `limitId + duration`이므로 이전 양쪽 형태를 하나로 합친다.
+fn normalize_deprecated_codex_ids(
+    provider: &str,
+    series: &mut BTreeMap<LimitId, Vec<UsageSample>>,
+    limits: &mut BTreeMap<LimitId, StoredLimit>,
+) {
+    if provider != "codex" {
+        return;
+    }
+    let ids: BTreeSet<LimitId> = series.keys().chain(limits.keys()).cloned().collect();
+    for old_id in ids {
+        let Some(new_id) = canonical_codex_id(&old_id) else {
+            continue;
+        };
+        if let Some(old_points) = series.remove(&old_id) {
+            let current_points = series.remove(&new_id).unwrap_or_default();
+            let mut by_minute = BTreeMap::new();
+            for point in old_points {
+                by_minute.insert(point.minute, point.percent);
+            }
+            for point in current_points {
+                by_minute.insert(point.minute, point.percent);
+            }
+            series.insert(
+                new_id.clone(),
+                by_minute
+                    .into_iter()
+                    .map(|(minute, percent)| UsageSample { minute, percent })
+                    .collect(),
+            );
+        }
+        if let Some(old_limit) = limits.remove(&old_id) {
+            limits.entry(new_id).or_insert(old_limit);
+        }
+    }
+}
+
+fn canonical_codex_id(id: &LimitId) -> Option<LimitId> {
+    let (with_slot, duration) = id.as_str().rsplit_once(':')?;
+    duration.parse::<i64>().ok().filter(|value| *value > 0)?;
+    let (base, slot) = with_slot.rsplit_once(':')?;
+    matches!(slot, "primary" | "secondary").then(|| LimitId::new(format!("{base}:{duration}")))
+}
+
 fn is_stable_id(id: &LimitId) -> bool {
     id.as_str().contains(':')
 }
@@ -899,6 +950,44 @@ mod tests {
             ..window(5)
         };
         assert!(repository.load("claude", later).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deprecated_codex_slot_id_is_restored_under_duration_id() {
+        let root = std::env::temp_dir().join(format!(
+            "agentmeter-codex-id-history-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let repository = FileHistoryRepository::at(root.clone());
+        let weekly = window(24 * 7);
+        let captured_at = weekly.started_at() + TimeDelta::hours(1);
+        let old_id = LimitId::new("codex_bengalfox:primary:10080");
+        let series = BTreeMap::from([(
+            old_id.clone(),
+            vec![UsageSample {
+                minute: captured_at.timestamp().div_euclid(60),
+                percent: 25.0,
+            }],
+        )]);
+        let old_limit = UsageLimit::new(
+            old_id.as_str(),
+            Some("GPT-5.3-Codex-Spark".into()),
+            25.0,
+            None,
+            false,
+            Some(weekly.duration),
+            Some(weekly.resets_at),
+        );
+        repository
+            .save("codex", weekly, &series, &[old_limit])
+            .unwrap();
+
+        let restored = repository.restore_active("codex", captured_at).unwrap();
+        let new_id = LimitId::new("codex_bengalfox:10080");
+        assert_eq!(restored.snapshot.unwrap().limits[0].id, new_id);
+        assert_eq!(restored.windows[0].series[&new_id][0].percent, 25.0);
         let _ = std::fs::remove_dir_all(root);
     }
 

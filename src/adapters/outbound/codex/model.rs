@@ -68,27 +68,31 @@ impl RateLimitsResponse {
     }
 }
 
-/// 주간 창으로 볼 최소 길이 (하루 초과). 이보다 짧은 창은 표시하지 않는다.
-const WEEKLY_MIN_MINS: i64 = 60 * 24;
+const FIVE_HOUR_MINS: i64 = 5 * 60;
+const LONG_WINDOW_MIN_MINS: i64 = 24 * 60;
 
-/// 주간 창만 보여준다. Codex 는 짧은 창을 쓰지 않거나 늘 0 이라 줄만 차지한다.
+/// app-server가 제공하는 5시간 창과 하루보다 긴 창을 보여준다.
+///
+/// `primary`·`secondary` 위치는 새 창이 추가되면 바뀔 수 있으므로 안정 ID에는
+/// 위치 대신 창 길이를 쓴다.
 pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
     let mut out = Vec::new();
     for snap in resp.snapshots() {
-        for (slot, w) in [
-            ("primary", snap.primary.as_ref()),
-            ("secondary", snap.secondary.as_ref()),
-        ] {
+        let base_id = snap.limit_id.as_deref().unwrap_or("codex");
+        let mut has_five_hour_window = false;
+        let mut has_long_window = false;
+        for w in [snap.primary.as_ref(), snap.secondary.as_ref()] {
             let Some(w) = w else { continue };
             let Some(mins) = w.window_duration_mins else {
                 continue;
             };
-            if mins <= WEEKLY_MIN_MINS {
+            if mins != FIVE_HOUR_MINS && mins <= LONG_WINDOW_MIN_MINS {
                 continue;
             }
-            let base_id = snap.limit_id.as_deref().unwrap_or("codex");
+            has_five_hour_window |= mins == FIVE_HOUR_MINS;
+            has_long_window |= mins > LONG_WINDOW_MIN_MINS;
             out.push(UsageLimit::new(
-                format!("{base_id}:{slot}:{mins}"),
+                format!("{base_id}:{mins}"),
                 snap.limit_name.clone(),
                 w.used_percent,
                 None,
@@ -97,8 +101,35 @@ pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
                 w.resets_at_local(),
             ));
         }
+        if !has_five_hour_window && has_long_window && snap.limit_name.is_some() {
+            out.push(empty_five_hour_limit(base_id, snap.limit_name.clone()));
+        }
     }
+    if !out
+        .iter()
+        .any(|limit| limit.window_duration == Some(chrono::TimeDelta::minutes(FIVE_HOUR_MINS)))
+    {
+        out.push(empty_five_hour_limit("codex", None));
+    }
+    out.sort_by(|left, right| {
+        left.window_duration
+            .cmp(&right.window_duration)
+            .then_with(|| left.scope.cmp(&right.scope))
+            .then_with(|| left.id.cmp(&right.id))
+    });
     out
+}
+
+fn empty_five_hour_limit(base_id: &str, scope: Option<String>) -> UsageLimit {
+    UsageLimit::new(
+        format!("{base_id}:{FIVE_HOUR_MINS}"),
+        scope,
+        0.0,
+        None,
+        false,
+        Some(chrono::TimeDelta::minutes(FIVE_HOUR_MINS)),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -116,8 +147,9 @@ mod tests {
       },
       "rateLimitsByLimitId": {
         "codex_bengalfox": {"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark",
-          "primary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":1787657494},
-          "secondary":null,"planType":"pro"},
+          "primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":1787694267},
+          "secondary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":1788281067},
+          "planType":"pro"},
         "codex": {"limitId":"codex","limitName":null,
           "primary":{"usedPercent":50,"windowDurationMins":10080,"resetsAt":1787196678},
           "secondary":null,"planType":"pro"}
@@ -140,25 +172,29 @@ mod tests {
     #[test]
     fn does_not_duplicate_default_limit() {
         let limits = to_limits(&parse());
-        assert_eq!(limits.len(), 2, "{limits:#?}");
+        assert_eq!(limits.len(), 3, "{limits:#?}");
     }
 
-    /// 이름 없는 기본 한도가 먼저, 그다음 이름순 — 실행마다 순서가 바뀌면 안 된다.
+    /// 짧은 창이 먼저, 같은 길이는 이름 없는 기본 한도가 먼저 온다.
     #[test]
     fn order_is_stable() {
         for _ in 0..20 {
             let limits = to_limits(&parse());
-            assert_eq!(limits[0].scope, None);
-            assert_eq!(limits[1].scope.as_deref(), Some("GPT-5.3-Codex-Spark"));
+            assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::hours(5)));
+            assert_eq!(limits[0].scope.as_deref(), Some("GPT-5.3-Codex-Spark"));
+            assert_eq!(limits[1].scope, None);
+            assert_eq!(limits[2].scope.as_deref(), Some("GPT-5.3-Codex-Spark"));
         }
     }
 
     #[test]
     fn usage_is_kept_as_domain_data() {
         let limits = to_limits(&parse());
-        assert_eq!(limits[0].used_percent, 50.0);
-        assert_eq!(limits[1].used_percent, 0.0);
-        assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::days(7)));
+        assert_eq!(limits[0].used_percent, 10.0);
+        assert_eq!(limits[1].used_percent, 50.0);
+        assert_eq!(limits[2].used_percent, 0.0);
+        assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::hours(5)));
+        assert_eq!(limits[1].window_duration, Some(chrono::TimeDelta::days(7)));
     }
 
     /// 다중 뷰가 없으면 단일 뷰로 내려간다.
@@ -169,22 +205,48 @@ mod tests {
             "secondary":null}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits.len(), 1);
-        assert_eq!(limits[0].scope, None);
-        assert_eq!(limits[0].used_percent, 42.0);
-        assert!(limits[0].resets_at.is_none());
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits[1].scope, None);
+        assert_eq!(limits[1].used_percent, 42.0);
+        assert!(limits[1].resets_at.is_none());
     }
 
-    /// 주간 창만 보여준다. 짧은 창은 줄만 차지하므로 제외한다.
     #[test]
-    fn shows_only_weekly_windows() {
+    fn shows_five_hour_and_weekly_windows() {
         let body = r#"{"rateLimits":{"limitId":"codex",
             "primary":{"usedPercent":10,"windowDurationMins":300},
             "secondary":{"usedPercent":60,"windowDurationMins":10080}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits.len(), 1, "5시간 창은 빠져야 함: {limits:#?}");
-        assert_eq!(limits[0].used_percent, 60.0);
+        assert_eq!(limits.len(), 2, "5시간·주간 창이 모두 필요함: {limits:#?}");
+        assert_eq!(limits[0].used_percent, 10.0);
+        assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::hours(5)));
+        assert_eq!(limits[1].used_percent, 60.0);
+        assert_eq!(limits[1].window_duration, Some(chrono::TimeDelta::days(7)));
+    }
+
+    #[test]
+    fn ignores_unrelated_short_windows() {
+        let body = r#"{"rateLimits":{"limitId":"codex",
+            "primary":{"usedPercent":10,"windowDurationMins":60}}}"#;
+        let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
+        let limits = to_limits(&r);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].id.as_str(), "codex:300");
+        assert_eq!(limits[0].used_percent, 0.0);
+        assert!(limits[0].resets_at.is_none());
+    }
+
+    #[test]
+    fn stable_id_does_not_depend_on_primary_or_secondary_slot() {
+        let primary = r#"{"rateLimits":{"limitId":"codex",
+            "primary":{"usedPercent":10,"windowDurationMins":10080}}}"#;
+        let secondary = r#"{"rateLimits":{"limitId":"codex",
+            "secondary":{"usedPercent":10,"windowDurationMins":10080}}}"#;
+        let primary: RateLimitsResponse = serde_json::from_str(primary).unwrap();
+        let secondary: RateLimitsResponse = serde_json::from_str(secondary).unwrap();
+        assert_eq!(to_limits(&primary)[1].id, to_limits(&secondary)[1].id);
+        assert_eq!(to_limits(&primary)[1].id.as_str(), "codex:10080");
     }
 
     /// `resetsAt` 이 없어도 시간 게이지 자리는 채운다.
@@ -194,17 +256,47 @@ mod tests {
             "primary":{"usedPercent":0,"windowDurationMins":10080}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::days(7)));
-        assert!(limits[0].resets_at.is_none());
+        assert_eq!(limits[1].window_duration, Some(chrono::TimeDelta::days(7)));
+        assert!(limits[1].resets_at.is_none());
     }
 
-    /// 창 길이를 모르면 표시하지 않는다 — 시간 게이지를 만들 수 없다.
+    /// 응답에 유효한 창이 없어도 빈 5시간 창은 유지한다.
     #[test]
-    fn skips_windows_without_duration() {
+    fn keeps_empty_five_hour_window_when_duration_is_missing() {
         let body = r#"{"rateLimits":{"limitId":"codex",
             "primary":{"usedPercent":10}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
-        assert!(to_limits(&r).is_empty());
+        let limits = to_limits(&r);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].id.as_str(), "codex:300");
+        assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::hours(5)));
+        assert_eq!(limits[0].used_percent, 0.0);
+        assert!(limits[0].resets_at.is_none());
+    }
+
+    #[test]
+    fn keeps_scoped_five_hour_window_when_only_scoped_week_is_returned() {
+        let body = r#"{
+          "rateLimits":{"limitId":"codex",
+            "primary":{"usedPercent":20,"windowDurationMins":10080}},
+          "rateLimitsByLimitId":{
+            "codex":{"limitId":"codex",
+              "primary":{"usedPercent":20,"windowDurationMins":10080}},
+            "codex_bengalfox":{"limitId":"codex_bengalfox",
+              "limitName":"GPT-5.3-Codex-Spark",
+              "primary":{"usedPercent":0,"windowDurationMins":10080}}
+          }
+        }"#;
+        let response: RateLimitsResponse = serde_json::from_str(body).unwrap();
+        let limits = to_limits(&response);
+        let session = limits
+            .iter()
+            .find(|limit| limit.window_duration == Some(chrono::TimeDelta::hours(5)))
+            .expect("빈 5시간 창도 남아야 함");
+        assert_eq!(session.id.as_str(), "codex_bengalfox:300");
+        assert_eq!(session.scope.as_deref(), Some("GPT-5.3-Codex-Spark"));
+        assert_eq!(session.used_percent, 0.0);
+        assert!(session.resets_at.is_none());
     }
 
     /// 리셋 시각이 있으면 남은 시간 게이지가 붙는다.
@@ -217,6 +309,6 @@ mod tests {
         );
         let r: RateLimitsResponse = serde_json::from_str(&body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits[0].resets_at.unwrap().timestamp(), at);
+        assert_eq!(limits[1].resets_at.unwrap().timestamp(), at);
     }
 }
