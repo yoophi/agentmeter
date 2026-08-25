@@ -91,6 +91,10 @@ Codex CLI 0.149.1에서 `GPT-5.3-Codex-Spark`의 `primary`에 300분 창,
 `secondary`에 10080분 창이 함께 관측됩니다. 300분 창과 하루보다 긴 창을 표시하고,
 짧은 창부터 정렬합니다. 그 외 짧은 창이나 창 길이가 없는 항목은 제외합니다.
 
+응답에서 300분 bucket 자체가 빠지면 `0% used`·`not started`인 `Current session`
+placeholder를 표시합니다. 이때는 알 수 없는 reset 시각을 추측하지 않습니다. 실제 300분
+창이 다시 반환되면 placeholder 대신 해당 scope·사용량·reset 시각을 사용합니다.
+
 새 창이 추가되면 기존 창이 `primary`에서 `secondary`로 이동할 수 있습니다. 히스토리
 ID는 이 위치를 쓰지 않고 `limitId + windowDurationMins`로 만들며, 예전 slot 기반 ID는
 SQLite에서 읽을 때 새 ID로 자동 병합합니다.

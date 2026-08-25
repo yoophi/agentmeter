@@ -98,6 +98,20 @@ pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
             ));
         }
     }
+    if !out
+        .iter()
+        .any(|limit| limit.window_duration == Some(chrono::TimeDelta::minutes(FIVE_HOUR_MINS)))
+    {
+        out.push(UsageLimit::new(
+            format!("codex:{FIVE_HOUR_MINS}"),
+            None,
+            0.0,
+            None,
+            false,
+            Some(chrono::TimeDelta::minutes(FIVE_HOUR_MINS)),
+            None,
+        ));
+    }
     out.sort_by(|left, right| {
         left.window_duration
             .cmp(&right.window_duration)
@@ -180,10 +194,10 @@ mod tests {
             "secondary":null}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits.len(), 1);
-        assert_eq!(limits[0].scope, None);
-        assert_eq!(limits[0].used_percent, 42.0);
-        assert!(limits[0].resets_at.is_none());
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits[1].scope, None);
+        assert_eq!(limits[1].used_percent, 42.0);
+        assert!(limits[1].resets_at.is_none());
     }
 
     #[test]
@@ -205,7 +219,11 @@ mod tests {
         let body = r#"{"rateLimits":{"limitId":"codex",
             "primary":{"usedPercent":10,"windowDurationMins":60}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
-        assert!(to_limits(&r).is_empty());
+        let limits = to_limits(&r);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].id.as_str(), "codex:300");
+        assert_eq!(limits[0].used_percent, 0.0);
+        assert!(limits[0].resets_at.is_none());
     }
 
     #[test]
@@ -216,8 +234,8 @@ mod tests {
             "secondary":{"usedPercent":10,"windowDurationMins":10080}}}"#;
         let primary: RateLimitsResponse = serde_json::from_str(primary).unwrap();
         let secondary: RateLimitsResponse = serde_json::from_str(secondary).unwrap();
-        assert_eq!(to_limits(&primary)[0].id, to_limits(&secondary)[0].id);
-        assert_eq!(to_limits(&primary)[0].id.as_str(), "codex:10080");
+        assert_eq!(to_limits(&primary)[1].id, to_limits(&secondary)[1].id);
+        assert_eq!(to_limits(&primary)[1].id.as_str(), "codex:10080");
     }
 
     /// `resetsAt` 이 없어도 시간 게이지 자리는 채운다.
@@ -227,17 +245,22 @@ mod tests {
             "primary":{"usedPercent":0,"windowDurationMins":10080}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::days(7)));
-        assert!(limits[0].resets_at.is_none());
+        assert_eq!(limits[1].window_duration, Some(chrono::TimeDelta::days(7)));
+        assert!(limits[1].resets_at.is_none());
     }
 
-    /// 창 길이를 모르면 표시하지 않는다 — 시간 게이지를 만들 수 없다.
+    /// 응답에 유효한 창이 없어도 빈 5시간 창은 유지한다.
     #[test]
-    fn skips_windows_without_duration() {
+    fn keeps_empty_five_hour_window_when_duration_is_missing() {
         let body = r#"{"rateLimits":{"limitId":"codex",
             "primary":{"usedPercent":10}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
-        assert!(to_limits(&r).is_empty());
+        let limits = to_limits(&r);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].id.as_str(), "codex:300");
+        assert_eq!(limits[0].window_duration, Some(chrono::TimeDelta::hours(5)));
+        assert_eq!(limits[0].used_percent, 0.0);
+        assert!(limits[0].resets_at.is_none());
     }
 
     /// 리셋 시각이 있으면 남은 시간 게이지가 붙는다.
@@ -250,6 +273,6 @@ mod tests {
         );
         let r: RateLimitsResponse = serde_json::from_str(&body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits[0].resets_at.unwrap().timestamp(), at);
+        assert_eq!(limits[1].resets_at.unwrap().timestamp(), at);
     }
 }
