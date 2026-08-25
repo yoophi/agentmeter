@@ -187,7 +187,8 @@ codex app-server generate-json-schema --out ./schema
 
 `rateLimitsByLimitId`(다중 버킷)가 있으면 그쪽을 쓰고, 없을 때만 하위호환용
 `rateLimits` 단일 뷰로 내려갑니다. 둘을 함께 쓰면 기본 한도가 두 번 나옵니다.
-주간 창만 보여주며, 호출이 저렴해 캐시 계층 없이 매번 직접 조회합니다.
+app-server가 제공하는 5시간·주간 창을 모두 보여주며, 호출이 저렴해 캐시 계층 없이
+매번 직접 조회합니다.
 
 자세한 내용은 [Codex app-server 연동](docs/codex-provider.md)을 보세요.
 

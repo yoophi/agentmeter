@@ -57,7 +57,7 @@ case "$CODEX_TEST_MODE" in
   success)
     printf '%s\n' '{"id":1,"result":{"codexHome":"/tmp"}}'
     printf '%s\n' '{"method":"remoteControl/status/changed","params":{}}'
-    printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":50,"windowDurationMins":10080,"resetsAt":1787196678}}}}'
+    printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":1786595478},"secondary":{"usedPercent":50,"windowDurationMins":10080,"resetsAt":1787196678}}}}'
     ;;
   exit) exit 7 ;;
   timeout) sleep 5 ;;
@@ -121,7 +121,10 @@ exec sleep 5
         set_mode("success");
 
         let snapshot = CodexUsageSource.fetch(FetchPolicy::Fresh).unwrap();
-        assert_eq!(snapshot.limits[0].used_percent, 50.0);
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].window_duration.unwrap().num_hours(), 5);
+        assert_eq!(snapshot.limits[0].used_percent, 10.0);
+        assert_eq!(snapshot.limits[1].used_percent, 50.0);
         assert_fixture_exists(&fake.pid_file);
         assert!(!process_exists(&fake.pid()));
     }

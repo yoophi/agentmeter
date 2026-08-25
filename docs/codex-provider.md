@@ -67,7 +67,8 @@ sequenceDiagram
     "codex": { ... 위와 동일 ... },
     "codex_bengalfox": {
       "limitId": "codex_bengalfox", "limitName": "GPT-5.3-Codex-Spark",
-      "primary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1787657494}
+      "primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1787694267},
+      "secondary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1788281067}
     }
   }
 }
@@ -84,11 +85,15 @@ sequenceDiagram
 `rateLimitsByLimitId` 는 맵이라 정렬하지 않으면 실행할 때마다 줄 순서가 바뀝니다.
 이름 없는 기본 한도를 먼저, 나머지를 이름순으로 놓습니다.
 
-### 주간 창만 보여준다
+### 5시간·주간 창을 모두 보여준다
 
-`windowDurationMins` 가 하루 이하인 창은 걸러냅니다. Codex 는 짧은 창을 쓰지 않거나
-늘 0 이라 줄만 차지합니다. 창 길이가 없는 항목도 제외합니다 — 시간 게이지를
-만들 수 없기 때문입니다.
+Codex CLI 0.149.1에서 `GPT-5.3-Codex-Spark`의 `primary`에 300분 창,
+`secondary`에 10080분 창이 함께 관측됩니다. 300분 창과 하루보다 긴 창을 표시하고,
+짧은 창부터 정렬합니다. 그 외 짧은 창이나 창 길이가 없는 항목은 제외합니다.
+
+새 창이 추가되면 기존 창이 `primary`에서 `secondary`로 이동할 수 있습니다. 히스토리
+ID는 이 위치를 쓰지 않고 `limitId + windowDurationMins`로 만들며, 예전 slot 기반 ID는
+SQLite에서 읽을 때 새 ID로 자동 병합합니다.
 
 ### provider 간 표기를 맞춘다
 
@@ -103,6 +108,11 @@ agentmeter는 provider 간 표기를 통일하기 위해 **소진율**로 바꿔
 원본이 `usedPercent` 이므로 `100 - x` 변환이 아니라 그 값을 그대로 씁니다.
 
 ```
+  Current session (GPT-5.3-Codex-Spark)
+  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  0% used
+  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  5 hour 0 minutes left
+  Resets Aug 26 at 6:44am (Asia/Seoul)
+
   Current week (all models)
   ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░  50% used
   █████████████████████████████████████░░░░░░░░░░░  1 day 15 hour 17 minutes left
