@@ -75,16 +75,10 @@ fn talk(child: &mut Child) -> Result<RateLimitsResponse, FetchError> {
         }
     });
 
-    for line in handshake() {
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.write_all(b"\n"))
-            .context("app-server 로 요청을 보내지 못했습니다")
-            .map_err(FetchError::Other)?;
-    }
-    stdin.flush().ok();
-
+    let messages = handshake();
     let deadline = Instant::now() + TIMEOUT;
+    send(&mut stdin, &messages[0])?;
+    let mut initialized = false;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -108,12 +102,27 @@ fn talk(child: &mut Child) -> Result<RateLimitsResponse, FetchError> {
             }
         };
 
-        // 알림(notification)이 섞여 오므로 우리 요청 id 만 골라낸다
-        match take_response(&line) {
-            Some(res) => return res,
-            None => continue,
+        if !initialized {
+            if let Some(result) = response_result(&line, 1) {
+                result?;
+                for message in &messages[1..] {
+                    send(&mut stdin, message)?;
+                }
+                initialized = true;
+            }
+        } else if let Some(result) = take_response(&line) {
+            return result;
         }
     }
+}
+
+fn send(writer: &mut impl Write, message: &str) -> Result<(), FetchError> {
+    writer
+        .write_all(message.as_bytes())
+        .and_then(|()| writer.write_all(b"\n"))
+        .and_then(|()| writer.flush())
+        .context("app-server 로 요청을 보내지 못했습니다")
+        .map_err(FetchError::Other)
 }
 
 fn handshake() -> Vec<String> {
@@ -134,8 +143,18 @@ fn handshake() -> Vec<String> {
 
 /// 한 줄을 보고 우리 응답이면 결과를, 아니면 `None` 을 돌려준다.
 fn take_response(line: &str) -> Option<Result<RateLimitsResponse, FetchError>> {
+    response_result(line, REQUEST_ID).map(|result| {
+        result.and_then(|value| {
+            serde_json::from_value(value)
+                .context("rateLimits 응답 파싱 실패")
+                .map_err(FetchError::Other)
+        })
+    })
+}
+
+fn response_result(line: &str, expected_id: i64) -> Option<Result<Value, FetchError>> {
     let mut v: Value = serde_json::from_str(line).ok()?;
-    if v.get("id").and_then(Value::as_i64) != Some(REQUEST_ID) {
+    if v.get("id").and_then(Value::as_i64) != Some(expected_id) {
         return None;
     }
     if let Some(err) = v.get("error") {
@@ -144,7 +163,6 @@ fn take_response(line: &str) -> Option<Result<RateLimitsResponse, FetchError>> {
             .and_then(Value::as_str)
             .unwrap_or("알 수 없는 오류")
             .to_string();
-        // 로그인 문제는 재인증 안내로 돌려준다
         let lower = msg.to_lowercase();
         if lower.contains("auth") || lower.contains("login") || lower.contains("unauthorized") {
             return Some(Err(FetchError::Unauthorized(format!(
@@ -153,12 +171,11 @@ fn take_response(line: &str) -> Option<Result<RateLimitsResponse, FetchError>> {
         }
         return Some(Err(FetchError::Other(anyhow!("app-server 오류: {msg}"))));
     }
-    let result = v.get_mut("result")?.take();
-    Some(
-        serde_json::from_value(result)
-            .context("rateLimits 응답 파싱 실패")
-            .map_err(FetchError::Other),
-    )
+    Some(v.get_mut("result").map(Value::take).ok_or_else(|| {
+        FetchError::Other(anyhow!(
+            "app-server 응답에 result가 없습니다 (id={expected_id})"
+        ))
+    }))
 }
 
 #[cfg(test)]

@@ -104,6 +104,7 @@ fn to_json(snapshot: &UsageSnapshot, timezone: &str) -> anyhow::Result<String> {
         source: &'static str,
         stale: bool,
         limits: Vec<Row<'a>>,
+        reset_credits: Option<model::ResetCreditsView>,
     }
     let meters = model::project(snapshot, timezone, chrono::Local::now());
     let rows: Vec<Row> = meters
@@ -133,6 +134,7 @@ fn to_json(snapshot: &UsageSnapshot, timezone: &str) -> anyhow::Result<String> {
         source: origin_name(snapshot.origin.kind),
         stale: snapshot.origin.refresh_failed,
         limits: rows,
+        reset_credits: model::reset_credits(snapshot, timezone),
     };
     Ok(serde_json::to_string_pretty(&out)?)
 }
@@ -189,5 +191,42 @@ mod tests {
         .unwrap();
         assert_eq!(value["limits"][0]["quota"]["remaining"], 9750.0);
         assert_eq!(value["limits"][0]["quota"]["unit"], "credits");
+    }
+
+    #[test]
+    fn credits_are_optional_structured_metadata_in_json_and_plain_output() {
+        let mut snapshot = UsageSnapshot::live(vec![], chrono::Local::now());
+        let json: serde_json::Value =
+            serde_json::from_str(&to_json(&snapshot, "UTC").unwrap()).unwrap();
+        assert!(json["reset_credits"].is_null());
+        assert!(!plain::render(&snapshot, "UTC", false, 100).contains("초기화권"));
+        for count in [0, 2] {
+            snapshot.reset_credits = Some(crate::domain::usage::ResetCredits {
+                available_count: count,
+                earliest_known_expires_at: None,
+            });
+            let json: serde_json::Value =
+                serde_json::from_str(&to_json(&snapshot, "UTC").unwrap()).unwrap();
+            assert_eq!(json["reset_credits"]["available_count"], count);
+            assert!(json["reset_credits"]["earliest_known_expires_at"].is_null());
+            let plain = plain::render(&snapshot, "UTC", false, 100);
+            assert!(plain.contains(&format!("초기화권 {count}장")));
+            assert!(!plain.contains("만료"));
+        }
+        let expiry = chrono::Local::now() + chrono::TimeDelta::days(2);
+        snapshot
+            .reset_credits
+            .as_mut()
+            .unwrap()
+            .earliest_known_expires_at = Some(expiry);
+        let json: serde_json::Value =
+            serde_json::from_str(&to_json(&snapshot, "Asia/Seoul").unwrap()).unwrap();
+        assert_eq!(
+            json["reset_credits"]["earliest_known_expires_at"],
+            expiry.to_rfc3339()
+        );
+        assert!(
+            plain::render(&snapshot, "Asia/Seoul", false, 100).contains("확인된 가장 빠른 만료:")
+        );
     }
 }

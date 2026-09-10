@@ -19,8 +19,14 @@ impl UsageSource for CodexUsageSource {
 }
 
 pub fn fetch() -> Result<UsageSnapshot, FetchError> {
-    client::fetch()
-        .map(|response| UsageSnapshot::live(model::to_limits(&response), chrono::Local::now()))
+    client::fetch().map(|response| {
+        let mut snapshot = UsageSnapshot::live(model::to_limits(&response), chrono::Local::now());
+        snapshot.reset_credits = response
+            .rate_limit_reset_credits
+            .as_ref()
+            .map(|credits| credits.to_domain());
+        snapshot
+    })
 }
 
 #[cfg(test)]
@@ -51,13 +57,30 @@ mod tests {
             let pid_file = root.join("pid");
             std::fs::write(
                 &bin,
-                r##"#!/bin/sh
+                r##"#!/bin/bash
 echo $$ > "$CODEX_TEST_PID"
 case "$CODEX_TEST_MODE" in
   success)
+    IFS= read -r init
+    case "$init" in *'"method":"initialize"'*) ;; *) exit 9 ;; esac
+    # No request may be sent until initialization succeeds.
+    /bin/sleep 0.05
+    if IFS= read -r -t 0.05 premature; then exit 9; fi
     printf '%s\n' '{"id":1,"result":{"codexHome":"/tmp"}}'
+    IFS= read -r ready
+    case "$ready" in *'"method":"initialized"'*) ;; *) exit 9 ;; esac
+    IFS= read -r request
+    case "$request" in *'"method":"account/rateLimits/read"'*) ;; *) exit 9 ;; esac
     printf '%s\n' '{"method":"remoteControl/status/changed","params":{}}'
-    printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":50,"windowDurationMins":10080,"resetsAt":1787196678}}}}'
+    printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":50,"windowDurationMins":300,"resetsAt":1787196678}},"rateLimitResetCredits":{"availableCount":2,"credits":[{"status":"available","expiresAt":1791092168}]}}}'
+    ;;
+  init_error)
+    IFS= read -r init
+    printf '%s\n' '{"id":1,"error":{"message":"initialization rejected"}}'
+    ;;
+  invalid_init)
+    IFS= read -r init
+    printf '%s\n' '{"id":1}'
     ;;
   exit) exit 7 ;;
   timeout) sleep 5 ;;
@@ -122,6 +145,16 @@ exec sleep 5
 
         let snapshot = CodexUsageSource.fetch(FetchPolicy::Fresh).unwrap();
         assert_eq!(snapshot.limits[0].used_percent, 50.0);
+        assert_eq!(
+            snapshot.limits[0].window_duration,
+            Some(chrono::TimeDelta::hours(5))
+        );
+        let credits = snapshot.reset_credits.unwrap();
+        assert_eq!(credits.available_count, 2);
+        assert_eq!(
+            credits.earliest_known_expires_at.unwrap().timestamp(),
+            1791092168
+        );
         assert_fixture_exists(&fake.pid_file);
         assert!(!process_exists(&fake.pid()));
     }
@@ -145,5 +178,19 @@ exec sleep 5
         let error = CodexUsageSource.fetch(FetchPolicy::Fresh).unwrap_err();
         assert!(error.to_string().contains("안에 응답하지 않았습니다"));
         assert!(!process_exists(&fake.pid()));
+    }
+    #[test]
+    fn initialization_failures_are_reported_and_child_is_reaped() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let fake = FakeCodex::install();
+        for (mode, message) in [
+            ("init_error", "initialization rejected"),
+            ("invalid_init", "result가 없습니다"),
+        ] {
+            set_mode(mode);
+            let error = CodexUsageSource.fetch(FetchPolicy::Fresh).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert!(!process_exists(&fake.pid()));
+        }
     }
 }

@@ -199,6 +199,22 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
         area = rest;
     }
 
+    if let Some(credits) = pane
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| model::reset_credits(snapshot, screen.timezone))
+    {
+        let mut lines = vec![Line::from(format!("  {}", credits.label))];
+        if let Some(expiry) = credits.expiry_label {
+            lines.push(Line::from(format!("  {expiry}")));
+        }
+        let [credit_area, rest] =
+            Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)])
+                .areas(area);
+        frame.render_widget(Paragraph::new(lines), credit_area);
+        area = rest;
+    }
+
     let meters = pane
         .snapshot
         .as_ref()
@@ -212,7 +228,11 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
                 Style::default().fg(color_for(Severity::Critical)),
             )),
             None => Line::from(Span::styled(
-                "  불러오는 중…",
+                if pane.snapshot.is_some() {
+                    "  표시할 사용량 구간이 없습니다"
+                } else {
+                    "  불러오는 중…"
+                },
                 Style::default().fg(Color::DarkGray),
             )),
         };
@@ -622,5 +642,32 @@ mod tests {
             Some(Local::now() + TimeDelta::seconds(42) + TimeDelta::milliseconds(900));
         let output = render(&state, 100, 30);
         assert!(output.contains("다음 42초"), "{output}");
+    }
+    #[test]
+    fn credits_survive_refresh_failure_and_render_without_windows() {
+        let mut state = state_with(&["codex"], false);
+        let mut snapshot = UsageSnapshot::live(vec![], Local::now());
+        snapshot.reset_credits = Some(crate::domain::usage::ResetCredits {
+            available_count: 2,
+            earliest_known_expires_at: Some(Local::now() + TimeDelta::days(1)),
+        });
+        state.watch.apply(vec![AgentResult {
+            agent: info("codex"),
+            result: Ok(snapshot),
+        }]);
+        state.watch.apply(vec![AgentResult {
+            agent: info("codex"),
+            result: Err(FetchError::Other(anyhow::anyhow!("offline"))),
+        }]);
+        let output = render(&state, 100, 24);
+        assert!(output.contains("초기화권 2장"), "{output}");
+        assert!(output.contains("확인된 가장 빠른 만료:"), "{output}");
+        assert!(output.contains("갱신 실패"));
+        assert!(output.contains("offline"));
+        for width in [10, 30, 60] {
+            for height in [3, 5, 12] {
+                let _ = render(&state, width, height);
+            }
+        }
     }
 }

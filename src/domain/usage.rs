@@ -169,10 +169,18 @@ impl Origin {
     }
 }
 
+/// Available reset entitlements; the expiry is the earliest among reported details.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResetCredits {
+    pub available_count: u64,
+    pub earliest_known_expires_at: Option<DateTime<Local>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageSnapshot {
     pub limits: Vec<UsageLimit>,
     pub origin: Origin,
+    pub reset_credits: Option<ResetCredits>,
 }
 
 impl UsageSnapshot {
@@ -180,6 +188,7 @@ impl UsageSnapshot {
         Self {
             limits,
             origin: Origin::live(captured_at),
+            reset_credits: None,
         }
     }
 }

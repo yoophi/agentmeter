@@ -29,6 +29,7 @@ pub(crate) struct Pane {
     pub source: Option<&'static str>,
     pub error: Option<String>,
     pub meters: Vec<Meter>,
+    pub reset_credits: Option<model::ResetCreditsView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +140,10 @@ pub(crate) fn project(
                         OriginKind::Live => "live",
                     }),
                 error: pane.error.clone(),
+                reset_credits: pane
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| model::reset_credits(snapshot, timezone)),
                 meters,
             }
         })
@@ -529,6 +534,54 @@ mod tests {
                 .filter(|marker| marker.kind == "midnight")
                 .count(),
             1
+        );
+    }
+    #[test]
+    fn credits_remain_visible_on_failure_and_clear_when_no_longer_reported() {
+        let now = Local::now();
+        let info = agent("codex");
+        let mut state = WatchState::new(vec![info]);
+        let mut snapshot = UsageSnapshot::live(vec![], now);
+        snapshot.reset_credits = Some(crate::domain::usage::ResetCredits {
+            available_count: 2,
+            earliest_known_expires_at: Some(now + TimeDelta::days(1)),
+        });
+        state.apply(vec![AgentResult {
+            agent: info,
+            result: Ok(snapshot),
+        }]);
+        state.apply(vec![AgentResult {
+            agent: info,
+            result: Err(crate::application::FetchError::Other(anyhow::anyhow!(
+                "offline"
+            ))),
+        }]);
+        let dashboard = project(&state, "Asia/Seoul", now, None, false);
+        let credits = dashboard.panes[0].reset_credits.as_ref().unwrap();
+        assert_eq!(credits.available_count, 2);
+        assert!(credits.expiry_label.as_ref().unwrap().contains("만료"));
+        assert!(
+            dashboard.panes[0]
+                .origin
+                .as_ref()
+                .unwrap()
+                .contains("갱신 실패")
+        );
+        assert!(
+            dashboard.panes[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("offline")
+        );
+        state.apply(vec![AgentResult {
+            agent: info,
+            result: Ok(UsageSnapshot::live(vec![], now)),
+        }]);
+        assert!(
+            project(&state, "Asia/Seoul", now, None, false).panes[0]
+                .reset_credits
+                .is_none()
         );
     }
 }

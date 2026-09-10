@@ -8,12 +8,14 @@
 use chrono::{DateTime, Local, TimeZone};
 use serde::Deserialize;
 
-use crate::domain::usage::UsageLimit;
+use crate::domain::usage::{ResetCredits, UsageLimit};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitsResponse {
     pub rate_limits: Snapshot,
+    #[serde(default)]
+    pub rate_limit_reset_credits: Option<ResetCreditsResponse>,
     #[serde(default)]
     pub rate_limits_by_limit_id: Option<std::collections::HashMap<String, Snapshot>>,
 }
@@ -43,6 +45,37 @@ pub struct Window {
     pub resets_at: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCreditsResponse {
+    available_count: u64,
+    #[serde(default)]
+    credits: Option<Vec<ResetCredit>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetCredit {
+    status: String,
+    #[serde(default)]
+    expires_at: Option<i64>,
+}
+
+impl ResetCreditsResponse {
+    pub fn to_domain(&self) -> ResetCredits {
+        ResetCredits {
+            available_count: self.available_count,
+            earliest_known_expires_at: self
+                .credits
+                .iter()
+                .flatten()
+                .filter(|credit| self.available_count > 0 && credit.status == "available")
+                .filter_map(|credit| Local.timestamp_opt(credit.expires_at?, 0).single())
+                .min(),
+        }
+    }
+}
+
 impl Window {
     pub fn resets_at_local(&self) -> Option<DateTime<Local>> {
         let ts = self.resets_at?;
@@ -68,10 +101,7 @@ impl RateLimitsResponse {
     }
 }
 
-/// 주간 창으로 볼 최소 길이 (하루 초과). 이보다 짧은 창은 표시하지 않는다.
-const WEEKLY_MIN_MINS: i64 = 60 * 24;
-
-/// 주간 창만 보여준다. Codex 는 짧은 창을 쓰지 않거나 늘 0 이라 줄만 차지한다.
+/// Keep all reported windows; missing duration only disables the time gauge.
 pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
     let mut out = Vec::new();
     for snap in resp.snapshots() {
@@ -80,20 +110,22 @@ pub fn to_limits(resp: &RateLimitsResponse) -> Vec<UsageLimit> {
             ("secondary", snap.secondary.as_ref()),
         ] {
             let Some(w) = w else { continue };
-            let Some(mins) = w.window_duration_mins else {
-                continue;
-            };
-            if mins <= WEEKLY_MIN_MINS {
-                continue;
-            }
+            let duration = w
+                .window_duration_mins
+                .filter(|mins| *mins > 0)
+                .and_then(chrono::TimeDelta::try_minutes);
+            let duration_id = w
+                .window_duration_mins
+                .map(|mins| mins.to_string())
+                .unwrap_or_else(|| "unknown".into());
             let base_id = snap.limit_id.as_deref().unwrap_or("codex");
             out.push(UsageLimit::new(
-                format!("{base_id}:{slot}:{mins}"),
+                format!("{base_id}:{slot}:{duration_id}"),
                 snap.limit_name.clone(),
                 w.used_percent,
                 None,
                 false,
-                Some(chrono::TimeDelta::minutes(mins)),
+                duration,
                 w.resets_at_local(),
             ));
         }
@@ -175,16 +207,17 @@ mod tests {
         assert!(limits[0].resets_at.is_none());
     }
 
-    /// 주간 창만 보여준다. 짧은 창은 줄만 차지하므로 제외한다.
+    /// Short windows are meaningful limits too.
     #[test]
-    fn shows_only_weekly_windows() {
+    fn preserves_short_and_weekly_windows() {
         let body = r#"{"rateLimits":{"limitId":"codex",
             "primary":{"usedPercent":10,"windowDurationMins":300},
             "secondary":{"usedPercent":60,"windowDurationMins":10080}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
         let limits = to_limits(&r);
-        assert_eq!(limits.len(), 1, "5시간 창은 빠져야 함: {limits:#?}");
-        assert_eq!(limits[0].used_percent, 60.0);
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits[0].used_percent, 10.0);
+        assert_eq!(limits[1].used_percent, 60.0);
     }
 
     /// `resetsAt` 이 없어도 시간 게이지 자리는 채운다.
@@ -198,13 +231,15 @@ mod tests {
         assert!(limits[0].resets_at.is_none());
     }
 
-    /// 창 길이를 모르면 표시하지 않는다 — 시간 게이지를 만들 수 없다.
+    /// Missing duration does not discard the usage percentage.
     #[test]
-    fn skips_windows_without_duration() {
+    fn preserves_windows_without_duration() {
         let body = r#"{"rateLimits":{"limitId":"codex",
             "primary":{"usedPercent":10}}}"#;
         let r: RateLimitsResponse = serde_json::from_str(body).unwrap();
-        assert!(to_limits(&r).is_empty());
+        let limits = to_limits(&r);
+        assert_eq!(limits.len(), 1);
+        assert!(limits[0].window_duration.is_none());
     }
 
     /// 리셋 시각이 있으면 남은 시간 게이지가 붙는다.
@@ -218,5 +253,45 @@ mod tests {
         let r: RateLimitsResponse = serde_json::from_str(&body).unwrap();
         let limits = to_limits(&r);
         assert_eq!(limits[0].resets_at.unwrap().timestamp(), at);
+    }
+    #[test]
+    fn credits_distinguish_absent_zero_and_count_only() {
+        for missing in ["{}", r#"{"rateLimitResetCredits":null}"#] {
+            let mut value: serde_json::Value = serde_json::from_str(missing).unwrap();
+            value["rateLimits"] = serde_json::json!({});
+            let response: RateLimitsResponse = serde_json::from_value(value).unwrap();
+            assert!(response.rate_limit_reset_credits.is_none());
+        }
+        for details in [serde_json::Value::Null, serde_json::json!([])] {
+            for count in [0, 2] {
+                let response: RateLimitsResponse = serde_json::from_value(serde_json::json!({
+                    "rateLimits": {}, "rateLimitResetCredits": {"availableCount": count, "credits": details}
+                })).unwrap();
+                let credits = response.rate_limit_reset_credits.unwrap().to_domain();
+                assert_eq!(credits.available_count, count);
+                assert!(credits.earliest_known_expires_at.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn expiry_uses_only_available_details_and_keeps_server_count() {
+        let response: RateLimitsResponse = serde_json::from_value(serde_json::json!({
+            "rateLimits": {}, "rateLimitResetCredits": {"availableCount": 5, "credits": [
+                {"status":"redeemed", "expiresAt": 100},
+                {"status":"future-status", "expiresAt": 200},
+                {"status":"available", "expiresAt": 400},
+                {"status":"available", "expiresAt": 300},
+                {"status":"available", "expiresAt": null},
+                {"status":"available", "expiresAt": i64::MAX}
+            ]}
+        }))
+        .unwrap();
+        let mut raw = response.rate_limit_reset_credits.unwrap();
+        let credits = raw.to_domain();
+        assert_eq!(credits.available_count, 5);
+        assert_eq!(credits.earliest_known_expires_at.unwrap().timestamp(), 300);
+        raw.available_count = 0;
+        assert!(raw.to_domain().earliest_known_expires_at.is_none());
     }
 }

@@ -187,7 +187,15 @@ codex app-server generate-json-schema --out ./schema
 
 `rateLimitsByLimitId`(다중 버킷)가 있으면 그쪽을 쓰고, 없을 때만 하위호환용
 `rateLimits` 단일 뷰로 내려갑니다. 둘을 함께 쓰면 기본 한도가 두 번 나옵니다.
-주간 창만 보여주며, 호출이 저렴해 캐시 계층 없이 매번 직접 조회합니다.
+5시간·주간 등 모든 한도 구간을 표시하며, 길이를 모르는 구간은 사용률만 표시합니다.
+캐시 계층 없이 매번 직접 조회합니다.
+
+초기화권 정보가 있으면 CLI·TUI·웹에 **초기화권 N장**과 확인된 가장 빠른 만료일을
+표시합니다. 상세 정보가 없으면 개수만 표시하며, 정보 없음과 0장은 구별합니다.
+상세 목록은 서버에서 일부만 제공할 수 있어 표시된 만료일은 보고된 항목 기준입니다.
+`--json`에는 선택적 `reset_credits` 객체(`available_count`, `earliest_known_expires_at`,
+`label`, `expiry_label`)가 추가됩니다. 정보가 없으면 `null`입니다.
+초기화권은 사용량 이력 파일에 저장하지 않으며, 앱 재실행 후 다시 조회합니다.
 
 자세한 내용은 [Codex app-server 연동](docs/codex-provider.md)을 보세요.
 

@@ -28,7 +28,7 @@ Codex 는 이 인터페이스를 `[experimental]` 로 표시하고 있어 바뀔
 
 ## 프로토콜
 
-줄 단위 JSON 이고 `jsonrpc` 필드는 없습니다. 세 줄을 보내고 응답을 기다립니다.
+줄 단위 JSON 이고 `jsonrpc` 필드는 없습니다. 초기화 성공 응답을 확인한 뒤 알림과 사용량 요청을 보냅니다.
 
 ```mermaid
 sequenceDiagram
@@ -46,7 +46,8 @@ sequenceDiagram
 - `initialized` 는 알림이라 `id` 가 없습니다.
 - `account/rateLimits/read` 는 파라미터가 없습니다.
 - **알림이 사이사이 끼어듭니다.** 위의 `remoteControl/status/changed` 처럼요.
-  그래서 응답은 `id == 2` 인 줄만 골라냅니다.
+  초기화 단계에서는 `id == 1`, 조회 단계에서는 `id == 2` 응답을 확인합니다.
+  초기화 오류나 결과 필드가 없는 응답은 즉시 오류로 보고합니다.
 
 읽기는 별도 스레드가 맡고 메인은 마감 시각까지만 기다립니다. 응답이 오지 않을 때
 영원히 매달리지 않기 위해서입니다(타임아웃 20초). 성공하든 실패하든 자식
@@ -84,11 +85,25 @@ sequenceDiagram
 `rateLimitsByLimitId` 는 맵이라 정렬하지 않으면 실행할 때마다 줄 순서가 바뀝니다.
 이름 없는 기본 한도를 먼저, 나머지를 이름순으로 놓습니다.
 
-### 주간 창만 보여준다
+### 모든 구간을 보존한다
 
-`windowDurationMins` 가 하루 이하인 창은 걸러냅니다. Codex 는 짧은 창을 쓰지 않거나
-늘 0 이라 줄만 차지합니다. 창 길이가 없는 항목도 제외합니다 — 시간 게이지를
-만들 수 없기 때문입니다.
+5시간·일간·주간 구간을 모두 도메인으로 변환합니다. 창 길이가 없는 항목도
+사용률은 보존하며, 시간 게이지만 생략합니다. 0 이하 또는 표현 범위를 넘는
+구간 길이는 시간 계산에 사용하지 않습니다.
+
+### 초기화권
+
+`rateLimitResetCredits`가 있으면 `availableCount`를 사용합니다. 상세 `credits`는
+없거나 `null`일 수 있으며 목록 길이가 개수보다 작을 수 있으므로 개수를 추정하지 않습니다.
+`status == "available"`인 항목 중 유효한 `expiresAt`의 최솟값을
+**확인된 가장 빠른 만료**로 표시합니다. 개수가 0이면 만료일은 표시하지 않습니다.
+
+초기화권은 `UsageSnapshot.reset_credits`의 부가 정보이며 사용률 게이지에 섞지 않습니다.
+공유 presentation 모델을 통해 plain·TUI·웹·JSON으로 출력합니다. JSON의
+`reset_credits`는 정보가 없으면 `null`, 있으면 `available_count`,
+`earliest_known_expires_at`(RFC 3339 또는 `null`), `label`, `expiry_label`을 포함합니다.
+갱신 실패 시 마지막 성공 정보와 오류 표시를 유지하고, 다음 성공 응답에 정보가 없으면
+기존 초기화권도 지웁니다. 이력 파일에는 저장하지 않으므로 재실행 후 다시 조회합니다.
 
 ### provider 간 표기를 맞춘다
 

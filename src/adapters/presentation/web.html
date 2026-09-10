@@ -78,6 +78,8 @@
     .pane-head { display: flex; justify-content: space-between; align-items: baseline; padding: 0 0 2px; }
     .pane-name { font-size: 15.84px; font-weight: 750; }
     .origin { color: var(--muted); font-size: 9.68px; text-align: right; }
+    .reset-credits { padding: 4px 0 12px 2ch; overflow-wrap: anywhere; }
+    .reset-credits .origin { text-align: left; }
     .loading { padding: 3em 0; color: var(--muted); }
     .meter { padding: 0 0 16px 2ch; }
     .meter-title { display: flex; align-items: baseline; gap: 2ch; min-height: var(--text-row); }
@@ -164,6 +166,7 @@
   <template id="pane-template">
     <article class="pane">
       <div class="pane-head"><span class="pane-name"></span><span class="origin"></span></div>
+      <div class="reset-credits" hidden></div>
       <div class="meters"></div>
     </article>
   </template>
@@ -291,9 +294,27 @@
         const node = paneTemplate.content.firstElementChild.cloneNode(true);
         node.querySelector('.pane-name').textContent = pane.display;
         node.querySelector('.origin').textContent = pane.origin || 'waiting for data';
+        const credits = node.querySelector('.reset-credits');
+        if (pane.reset_credits) {
+          credits.hidden = false;
+          const label = document.createElement('div');
+          label.textContent = pane.reset_credits.label;
+          credits.append(label);
+          if (pane.reset_credits.expiry_label) {
+            const expiry = document.createElement('div');
+            expiry.className = 'origin';
+            expiry.textContent = pane.reset_credits.expiry_label;
+            credits.append(expiry);
+          }
+        }
         const meters = node.querySelector('.meters');
         if (pane.meters.length) pane.meters.forEach(meter => meters.append(renderMeter(meter)));
-        else meters.innerHTML = '<div class="loading">Loading usage data…</div>';
+        else {
+          const empty = document.createElement('div');
+          empty.className = 'loading';
+          empty.textContent = pane.origin ? 'No usage windows available' : 'Loading usage data…';
+          meters.append(empty);
+        }
         panes.append(node);
       }
       const errors = data.panes

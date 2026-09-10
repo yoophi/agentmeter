@@ -34,12 +34,16 @@ fn render_at(
     now: chrono::DateTime<chrono::Local>,
 ) -> String {
     let meters = model::project(snapshot, timezone, now);
-    render_projected(
-        &meters,
-        &model::origin_text(snapshot.origin, now),
-        color,
-        width,
-    )
+    let mut origin = model::origin_text(snapshot.origin, now);
+    if let Some(credits) = model::reset_credits(snapshot, timezone) {
+        let mut lines = vec![credits.label];
+        if let Some(expiry) = credits.expiry_label {
+            lines.push(expiry);
+        }
+        lines.push(origin);
+        origin = lines.join("\n  ");
+    }
+    render_projected(&meters, &origin, color, width)
 }
 
 fn render_projected(meters: &[Meter], origin: &str, color: bool, width: usize) -> String {

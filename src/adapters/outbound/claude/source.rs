@@ -211,6 +211,7 @@ impl ClaudeUsageSource {
 fn snapshot(response: &UsageResponse, origin: Origin) -> UsageSnapshot {
     UsageSnapshot {
         limits: to_limits(&response.limits),
+        reset_credits: None,
         origin,
     }
 }

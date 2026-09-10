@@ -675,6 +675,7 @@ fn restored_snapshot(candidates: BTreeMap<LimitId, RestoredLimit>) -> Option<Usa
     Some(UsageSnapshot {
         limits,
         origin: Origin::cache(captured_at, false),
+        reset_credits: None,
     })
 }
 
