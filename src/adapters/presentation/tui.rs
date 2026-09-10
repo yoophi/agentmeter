@@ -204,10 +204,11 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
         .as_ref()
         .and_then(|snapshot| model::reset_credits(snapshot, screen.timezone))
     {
-        let mut lines = vec![Line::from(format!("  {}", credits.label))];
+        let mut lines = vec![Line::from(format!("   {}", credits.label))];
         if let Some(expiry) = credits.expiry_label {
-            lines.push(Line::from(format!("  {expiry}")));
+            lines.push(Line::from(format!("   {expiry}")));
         }
+        lines.push(Line::default());
         let [credit_area, rest] =
             Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)])
                 .areas(area);
@@ -660,8 +661,8 @@ mod tests {
             result: Err(FetchError::Other(anyhow::anyhow!("offline"))),
         }]);
         let output = render(&state, 100, 24);
-        assert!(output.contains("초기화권 2장"), "{output}");
-        assert!(output.contains("확인된 가장 빠른 만료:"), "{output}");
+        assert!(output.contains("Reset credits: 2"), "{output}");
+        assert!(output.contains("Known expiry:"), "{output}");
         assert!(output.contains("갱신 실패"));
         assert!(output.contains("offline"));
         for width in [10, 30, 60] {

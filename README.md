@@ -190,7 +190,7 @@ codex app-server generate-json-schema --out ./schema
 5시간·주간 등 모든 한도 구간을 표시하며, 길이를 모르는 구간은 사용률만 표시합니다.
 캐시 계층 없이 매번 직접 조회합니다.
 
-초기화권 정보가 있으면 CLI·TUI·웹에 **초기화권 N장**과 확인된 가장 빠른 만료일을
+초기화권 정보가 있으면 CLI·TUI·웹에 **Reset credits: N**과 **Known expiry**(확인된 가장 빠른 만료일)를
 표시합니다. 상세 정보가 없으면 개수만 표시하며, 정보 없음과 0장은 구별합니다.
 상세 목록은 서버에서 일부만 제공할 수 있어 표시된 만료일은 보고된 항목 기준입니다.
 `--json`에는 선택적 `reset_credits` 객체(`available_count`, `earliest_known_expires_at`,

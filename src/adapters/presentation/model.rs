@@ -49,13 +49,10 @@ pub(crate) fn reset_credits(snapshot: &UsageSnapshot, timezone: &str) -> Option<
     Some(ResetCreditsView {
         available_count: credits.available_count,
         earliest_known_expires_at: credits.earliest_known_expires_at.map(|at| at.to_rfc3339()),
-        label: format!("초기화권 {}장", credits.available_count),
-        expiry_label: credits.earliest_known_expires_at.map(|at| {
-            format!(
-                "확인된 가장 빠른 만료: {} ({timezone})",
-                at.format("%Y-%m-%d %H:%M")
-            )
-        }),
+        label: format!("Reset credits: {}", credits.available_count),
+        expiry_label: credits
+            .earliest_known_expires_at
+            .map(|at| format!("Known expiry: {} ({timezone})", at.format("%Y-%m-%d %H:%M"))),
     })
 }
 

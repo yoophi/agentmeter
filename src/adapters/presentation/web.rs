@@ -559,7 +559,7 @@ mod tests {
         let dashboard = project(&state, "Asia/Seoul", now, None, false);
         let credits = dashboard.panes[0].reset_credits.as_ref().unwrap();
         assert_eq!(credits.available_count, 2);
-        assert!(credits.expiry_label.as_ref().unwrap().contains("만료"));
+        assert!(credits.expiry_label.as_ref().unwrap().contains("expiry"));
         assert!(
             dashboard.panes[0]
                 .origin

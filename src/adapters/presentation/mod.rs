@@ -199,7 +199,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&to_json(&snapshot, "UTC").unwrap()).unwrap();
         assert!(json["reset_credits"].is_null());
-        assert!(!plain::render(&snapshot, "UTC", false, 100).contains("초기화권"));
+        assert!(!plain::render(&snapshot, "UTC", false, 100).contains("Reset credits:"));
         for count in [0, 2] {
             snapshot.reset_credits = Some(crate::domain::usage::ResetCredits {
                 available_count: count,
@@ -210,8 +210,8 @@ mod tests {
             assert_eq!(json["reset_credits"]["available_count"], count);
             assert!(json["reset_credits"]["earliest_known_expires_at"].is_null());
             let plain = plain::render(&snapshot, "UTC", false, 100);
-            assert!(plain.contains(&format!("초기화권 {count}장")));
-            assert!(!plain.contains("만료"));
+            assert!(plain.contains(&format!("Reset credits: {count}")));
+            assert!(!plain.contains("expiry"));
         }
         let expiry = chrono::Local::now() + chrono::TimeDelta::days(2);
         snapshot
@@ -225,8 +225,6 @@ mod tests {
             json["reset_credits"]["earliest_known_expires_at"],
             expiry.to_rfc3339()
         );
-        assert!(
-            plain::render(&snapshot, "Asia/Seoul", false, 100).contains("확인된 가장 빠른 만료:")
-        );
+        assert!(plain::render(&snapshot, "Asia/Seoul", false, 100).contains("Known expiry:"));
     }
 }

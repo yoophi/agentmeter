@@ -36,12 +36,11 @@ fn render_at(
     let meters = model::project(snapshot, timezone, now);
     let mut origin = model::origin_text(snapshot.origin, now);
     if let Some(credits) = model::reset_credits(snapshot, timezone) {
-        let mut lines = vec![credits.label];
+        let mut lines = vec![format!(" {}", credits.label)];
         if let Some(expiry) = credits.expiry_label {
-            lines.push(expiry);
+            lines.push(format!(" {expiry}"));
         }
-        lines.push(origin);
-        origin = lines.join("\n  ");
+        origin = format!("{}\n\n  {origin}", lines.join("\n  "));
     }
     render_projected(&meters, &origin, color, width)
 }
