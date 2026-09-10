@@ -82,6 +82,7 @@
     .reset-credits .origin { text-align: left; }
     .loading { padding: 3em 0; color: var(--muted); }
     .meter, .reset-credits { margin: 0; padding: 0 0 16px 2ch; }
+    .reset-credits:not([hidden]) { margin-top: var(--text-row); }
     .meter-title { display: flex; align-items: baseline; gap: 2ch; min-height: var(--text-row); }
     .meter-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cbd1de; }
     .meter-name.active::before { content: "› "; color: var(--text); font-weight: 800; }
@@ -166,8 +167,8 @@
   <template id="pane-template">
     <article class="pane">
       <div class="pane-head"><span class="pane-name"></span><span class="origin"></span></div>
-      <div class="reset-credits" hidden></div>
       <div class="meters"></div>
+      <div class="reset-credits" hidden></div>
     </article>
   </template>
   <template id="meter-template">

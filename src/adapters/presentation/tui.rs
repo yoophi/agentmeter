@@ -199,23 +199,6 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
         area = rest;
     }
 
-    if let Some(credits) = pane
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| model::reset_credits(snapshot, screen.timezone))
-    {
-        let mut lines = vec![Line::from(format!("   {}", credits.label))];
-        if let Some(expiry) = credits.expiry_label {
-            lines.push(Line::from(format!("   {expiry}")));
-        }
-        lines.push(Line::default());
-        let [credit_area, rest] =
-            Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)])
-                .areas(area);
-        frame.render_widget(Paragraph::new(lines), credit_area);
-        area = rest;
-    }
-
     let meters = pane
         .snapshot
         .as_ref()
@@ -237,7 +220,10 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
                 Style::default().fg(Color::DarkGray),
             )),
         };
-        frame.render_widget(Paragraph::new(message), area);
+        let [message_area, credits_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        frame.render_widget(Paragraph::new(message), message_area);
+        draw_reset_credits(frame, credits_area, pane, screen.timezone);
         return;
     }
 
@@ -269,6 +255,22 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
         );
         base += size;
     }
+    draw_reset_credits(frame, slots[base], pane, screen.timezone);
+}
+
+fn draw_reset_credits(frame: &mut Frame, area: Rect, pane: &WatchPane, timezone: &str) {
+    let Some(credits) = pane
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| model::reset_credits(snapshot, timezone))
+    else {
+        return;
+    };
+    let mut lines = vec![Line::default(), Line::from(format!("   {}", credits.label))];
+    if let Some(expiry) = credits.expiry_label {
+        lines.push(Line::from(format!("   {expiry}")));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_one(
@@ -670,5 +672,36 @@ mod tests {
                 let _ = render(&state, width, height);
             }
         }
+    }
+    #[test]
+    fn reset_credits_follow_all_meters_with_top_spacing() {
+        let mut state = state_with(&["codex"], false);
+        let mut snapshot = UsageSnapshot::live(limits(), Local::now());
+        snapshot.reset_credits = Some(crate::domain::usage::ResetCredits {
+            available_count: 0,
+            earliest_known_expires_at: None,
+        });
+        state.watch.apply(vec![AgentResult {
+            agent: info("codex"),
+            result: Ok(snapshot),
+        }]);
+        let output = render(&state, 100, 50);
+        let rows: Vec<_> = output.lines().collect();
+        let credits = rows
+            .iter()
+            .position(|line| line.contains("Reset credits: 0"))
+            .unwrap();
+        let last_reset = rows
+            .iter()
+            .rposition(|line| line.contains("Resets "))
+            .unwrap();
+        assert!(credits > last_reset + 1, "{output}");
+        assert!(rows[credits - 1].trim().is_empty());
+        assert!(!output.contains("Known expiry:"));
+        state.watch.apply(vec![AgentResult {
+            agent: info("codex"),
+            result: Ok(UsageSnapshot::live(limits(), Local::now())),
+        }]);
+        assert!(!render(&state, 100, 50).contains("Reset credits:"));
     }
 }
