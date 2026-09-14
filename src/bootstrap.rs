@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::adapters::outbound::claude::source::ClaudeUsageSource;
 use crate::adapters::outbound::codex::source::CodexUsageSource;
 use crate::adapters::outbound::config::FileSettingsRepository;
+use crate::adapters::outbound::glm::source::GlmUsageSource;
 use crate::adapters::outbound::history::FileHistoryRepository;
 use crate::adapters::outbound::kiro::source::KiroUsageSource;
 use crate::application::{
@@ -35,6 +36,13 @@ pub(crate) fn production() -> anyhow::Result<Runtime> {
                 display: "Codex",
             },
             CodexUsageSource,
+        ),
+        RegisteredAgent::new(
+            AgentInfo {
+                name: "glm",
+                display: "GLM",
+            },
+            GlmUsageSource::default(),
         ),
         RegisteredAgent::new(
             AgentInfo {

@@ -1,7 +1,7 @@
 # agentmeter
 
 코딩 에이전트의 사용 한도를 같은 형식으로 보여주는 CLI입니다. 설정한 에이전트들을
-한 화면에 나란히 표시하거나 `--agent`로 Claude Code, Codex 또는 Kiro 하나만 선택할 수 있습니다.
+한 화면에 나란히 표시하거나 `--agent`로 Claude Code, Codex, GLM, Kiro 중 하나만 선택할 수 있습니다.
 
 각 도구의 `/usage`·`/status` 가 보여주는 것과 같은 값 — 한도 소진율과 리셋 시각 — 을
 터미널에서 바로 확인하거나 상주시켜 둘 수 있습니다.
@@ -59,6 +59,7 @@ brew upgrade agentmeter
 agentmeter                              # 설정한 에이전트를 모두 조회
 agentmeter --agent claude               # 설정과 관계없이 Claude Code만 조회
 agentmeter --agent codex --json         # 설정과 관계없이 Codex만 JSON 출력
+agentmeter --agent glm                   # GLM Coding Plan 5시간 창과 MCP 한도
 agentmeter --agent kiro                  # Kiro 월간 credit과 잔여량 표시
 agentmeter --agent claude --watch        # Claude Code만 상주 모드로 표시
 agentmeter -w                           # 상주 모드 (좌우 분할)
@@ -78,12 +79,12 @@ agentmeter config set agents=claude,codex   # 표시할 에이전트 지정
 (`XDG_CONFIG_HOME` 을 존중합니다).
 
 ```toml
-agents = ["claude", "codex", "kiro"]
+agents = ["claude", "codex", "glm", "kiro"]
 ```
 
 순서가 화면 순서입니다. 파일이 없으면 등록된 에이전트를 모두 보여줍니다.
 모르는 이름을 넣으면 **저장하기 전에** 거절합니다.
-`--agent claude`, `--agent codex` 또는 `--agent kiro`를 지정하면 설정 파일을 읽지 않고 이번 실행에만
+`--agent claude`, `--agent codex`, `--agent glm` 또는 `--agent kiro`를 지정하면 설정 파일을 읽지 않고 이번 실행에만
 해당 에이전트를 표시합니다. 설정 파일의 `agents` 값은 변경하지 않습니다.
 
 상주 모드에서 `r`은 캐시 우선 즉시 새로고침, `R`은 provider 캐시와 백오프를
@@ -199,6 +200,20 @@ codex app-server generate-json-schema --out ./schema
 
 자세한 내용은 [Codex app-server 연동](docs/codex-provider.md)을 보세요.
 
+### GLM
+
+Z.ai GLM Coding Plan의 **계정 쿼터**를 읽습니다. 5시간 토큰 창과 월간 MCP 도구 한도를
+소진율·리셋 시각과 함께 보여줍니다. 계정 단위 값이라 여러 기기에서 쓴 양이 합산되어
+있습니다.
+
+API 키는 `ZAI_API_KEY` → `GLM_TRACKER_ZAI_KEY` → `~/.local/share/opencode/auth.json`의
+`zai-coding-plan` 순으로 찾습니다. 이미 GLM을 쓰고 있다면 대개 마지막 경로에 있습니다.
+
+이 조회는 **공식 문서에 없는 내부 엔드포인트**(공식 플러그인이 쓰는 경로)를 사용합니다.
+스키마 변경이나 차단에 대비해 실패는 오류로 표시하고 직전 값을 유지합니다.
+
+자세한 내용은 [GLM Coding Plan 연동](docs/glm-provider.md)을 보세요.
+
 ### Kiro
 
 로그인된 공식 CLI에서 `kiro-cli chat --no-interactive "/usage"`를 실행해 월간 구독
@@ -245,6 +260,7 @@ Claude provider가 캐시를 먼저 읽는 것도 이 때문입니다 — 기본
 - [docs/architecture-review.html](docs/architecture-review.html) — 헥사고날 아키텍처 전체 리뷰
 - [Claude 조회 정책](docs/claude-provider.md) — 캐시 우선 조회, 자격증명, 429 대응
 - [Codex app-server 연동](docs/codex-provider.md) — app-server 프로토콜, 응답 처리
+- [GLM Coding Plan 연동](docs/glm-provider.md) — 계정 쿼터, API 키 탐색, 한도 매핑
 - [Kiro CLI 연동](docs/kiro-provider.md) — credit 수집, 캐시, JSON 출력
 - [docs/web-dashboard.md](docs/web-dashboard.md) — 로컬 서버, 갱신 흐름, JSON projection
 
