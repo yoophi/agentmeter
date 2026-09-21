@@ -43,7 +43,7 @@ fn fetch_with(key: &str) -> Result<Envelope, FetchError> {
         .header("Accept", "application/json")
         .call()
         .map_err(|error| {
-            FetchError::Other(anyhow::Error::new(error).context("quota 엔드포인트 호출 실패"))
+            FetchError::Other(anyhow::Error::new(error).context("the quota endpoint call failed"))
         })?;
 
     let status = resp.status().as_u16();
@@ -54,7 +54,7 @@ fn fetch_with(key: &str) -> Result<Envelope, FetchError> {
     let body = resp
         .body_mut()
         .read_to_string()
-        .context("응답 본문을 읽지 못했습니다")
+        .context("could not read the response body")
         .map_err(FetchError::Other)?;
 
     parse_body(&body).map_err(FetchError::Other)
@@ -63,15 +63,14 @@ fn fetch_with(key: &str) -> Result<Envelope, FetchError> {
 fn status_error(status: u16) -> FetchError {
     match status {
         401 | 403 => FetchError::Unauthorized(auth::hint().to_string()),
-        429 => FetchError::Other(anyhow::anyhow!(
-            "조회가 제한되었습니다 (HTTP 429). 잠시 후 다시 시도하세요"
-        )),
-        other => FetchError::Other(anyhow::anyhow!("서버가 HTTP {other} 를 반환했습니다")),
+        429 => FetchError::Other(anyhow::anyhow!("rate limited (HTTP 429). retry shortly")),
+        other => FetchError::Other(anyhow::anyhow!("the server returned HTTP {other}")),
     }
 }
 
 fn parse_body(body: &str) -> Result<Envelope> {
-    let parsed: Envelope = serde_json::from_str(body).context("quota 응답 파싱 실패")?;
+    let parsed: Envelope =
+        serde_json::from_str(body).context("could not parse the quota response")?;
     // HTTP 200 이어도 본문 code 로 실패를 알리는 API 다.
     if parsed.code != 200 {
         let message = parsed
@@ -80,10 +79,10 @@ fn parse_body(body: &str) -> Result<Envelope> {
         bail!("{message}");
     }
     let Some(data) = &parsed.data else {
-        bail!("응답에 data 가 없습니다 (스키마가 변경되었을 수 있습니다)");
+        bail!("the response has no data (the schema may have changed)");
     };
     if data.limits.is_empty() {
-        bail!("응답에 limits 항목이 없습니다 (스키마가 변경되었을 수 있습니다)");
+        bail!("the response has no limits (the schema may have changed)");
     }
     Ok(parsed)
 }

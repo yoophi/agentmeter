@@ -21,7 +21,7 @@ use crate::domain::usage::UsageSnapshot;
 use crate::local_timezone;
 
 const MULTI_PROG: &str = "agentmeter";
-const MULTI_ABOUT: &str = "설정한 에이전트들의 사용 한도를 한 화면에서 보여줍니다";
+const MULTI_ABOUT: &str = "Show the usage limits of your configured agents on one screen";
 
 #[derive(Debug, Parser)]
 #[command(name = MULTI_PROG, about = MULTI_ABOUT, version = crate::VERSION, long_about = None)]
@@ -31,34 +31,34 @@ struct Root {
     #[command(flatten)]
     view: Cli,
 
-    /// 설정과 관계없이 이번 실행에 표시할 에이전트
+    /// Agent to show for this run, ignoring the configuration
     #[arg(long, global = true, value_name = "NAME")]
     agent: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// 표시할 에이전트를 설정합니다
+    /// Configure which agents to show
     Config(ConfigArgs),
-    /// 브라우저에서 보는 로컬 실시간 대시보드를 실행합니다
+    /// Run the local live dashboard in a browser
     Web(WebArgs),
 }
 
 #[derive(Debug, Args)]
 struct WebArgs {
-    /// 캐시를 건너뛰고 매 주기 직접 조회합니다
+    /// Skip the cache and fetch live on every cycle
     #[arg(long)]
     live: bool,
 
-    /// 갱신 주기(초)
+    /// Refresh interval in seconds
     #[arg(short = 'n', long, value_name = "SECS", default_value_t = cli::DEFAULT_INTERVAL)]
     interval: u64,
 
-    /// 고정 포트로 실행합니다 (생략하면 ephemeral port)
+    /// Bind a fixed port (an ephemeral port when omitted)
     #[arg(long, value_name = "PORT")]
     port: Option<u16>,
 
-    /// 서버가 바인딩할 IP 주소
+    /// IP address the server binds to
     #[arg(long, value_name = "HOST", default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     host: IpAddr,
 }
@@ -77,11 +77,11 @@ struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigAction {
-    /// 설정 전체를 보여줍니다
+    /// Show the whole configuration
     List,
-    /// 한 항목의 값을 보여줍니다
+    /// Show one value
     Get { key: String },
-    /// 값을 저장합니다 — `agents=claude,codex`
+    /// Store a value, as in `agents=claude,codex`
     Set { assignment: String },
 }
 
@@ -136,7 +136,7 @@ fn selected_agent_names(
 fn web_command(arguments: WebArgs, runtime: Runtime, names: Vec<String>) -> Result<()> {
     if arguments.interval < cli::MIN_INTERVAL {
         eprintln!(
-            "{MULTI_PROG}: 갱신 주기를 {}초로 올렸습니다 (원격 조회라 최소 {}초)",
+            "{MULTI_PROG}: raised the interval to {}s (remote fetch, minimum {}s)",
             arguments.interval_secs(),
             cli::MIN_INTERVAL
         );
@@ -168,7 +168,7 @@ fn web_command(arguments: WebArgs, runtime: Runtime, names: Vec<String>) -> Resu
         server.shutdown()
     } else {
         println!("{MULTI_PROG} web: {address}");
-        println!("종료하려면 Ctrl-C를 누르세요.");
+        println!("Press Ctrl-C to stop.");
         server.wait()
     }
 }
@@ -220,7 +220,7 @@ fn run(
         if stdout_is_tty {
             if arguments.interval_was_clamped() {
                 eprintln!(
-                    "{prog}: 갱신 주기를 {}초로 올렸습니다 (원격 조회라 최소 {}초)",
+                    "{prog}: raised the interval to {}s (remote fetch, minimum {}s)",
                     arguments.interval_secs(),
                     cli::MIN_INTERVAL
                 );
@@ -236,7 +236,7 @@ fn run(
             presentation::tui::run(prog, timezone, session, None)?;
             return Ok(ExitCode::SUCCESS);
         }
-        eprintln!("{prog}: 출력이 터미널이 아니라 1회 출력합니다 (watch 와 함께 쓰세요)");
+        eprintln!("{prog}: output is not a terminal, printing once (pair this with watch)");
     }
 
     once(
@@ -315,7 +315,7 @@ fn config_command(action: ConfigAction, runtime: &Runtime) -> Result<()> {
         ConfigAction::List => {
             let current = runtime.settings.load()?;
             println!("agents = {}", current.agents.join(","));
-            println!("# 설정 파일: {}", runtime.settings_path.display());
+            println!("# config file: {}", runtime.settings_path.display());
             Ok(())
         }
         ConfigAction::Get { key } => {
@@ -325,17 +325,17 @@ fn config_command(action: ConfigAction, runtime: &Runtime) -> Result<()> {
                     println!("{}", current.agents.join(","));
                     Ok(())
                 }
-                other => bail!("알 수 없는 설정 키: {other}. 쓸 수 있는 키: agents"),
+                other => bail!("unknown config key: {other}. available keys: agents"),
             }
         }
         ConfigAction::Set { assignment } => {
             let (key, value) = split_assignment(&assignment)?;
             let current = match key {
                 "agents" => runtime.settings.replace_agents(split_list(value))?,
-                other => bail!("알 수 없는 설정 키: {other}. 쓸 수 있는 키: agents"),
+                other => bail!("unknown config key: {other}. available keys: agents"),
             };
             println!("agents = {}", current.agents.join(","));
-            println!("저장했습니다: {}", runtime.settings_path.display());
+            println!("saved: {}", runtime.settings_path.display());
             Ok(())
         }
     }
@@ -344,7 +344,7 @@ fn config_command(action: ConfigAction, runtime: &Runtime) -> Result<()> {
 fn split_assignment(argument: &str) -> Result<(&str, &str)> {
     match argument.split_once('=') {
         Some((key, value)) => Ok((key.trim(), value.trim())),
-        None => bail!("`키=값` 형태여야 합니다. 예: agents=claude,codex"),
+        None => bail!("expected `key=value`, for example agents=claude,codex"),
     }
 }
 
@@ -393,10 +393,10 @@ mod tests {
 
     #[test]
     fn failures_are_rendered_in_the_body() {
-        let error = FetchError::Unauthorized("재로그인 필요".into());
+        let error = FetchError::Unauthorized("sign in again".into());
         let (text, success) = once_output("agentmeter", "Asia/Seoul", false, 80, &Err(error));
         assert!(!success);
-        assert!(text.contains("재로그인 필요"));
+        assert!(text.contains("sign in again"));
         assert!(text.starts_with("agentmeter:"));
     }
 

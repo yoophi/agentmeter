@@ -3,23 +3,23 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(version = crate::VERSION, long_about = None)]
 pub struct Cli {
-    /// 상주 모드 — 전체 화면으로 계속 갱신합니다
+    /// Stay resident and keep refreshing full screen
     #[arg(short = 'w', long)]
     pub watch: bool,
 
-    /// 갱신 주기(초). 지정하면 상주 모드가 켜집니다
+    /// Refresh interval in seconds. Implies watch mode
     #[arg(short = 'n', long, value_name = "SECS")]
     pub interval: Option<u64>,
 
-    /// JSON 으로 출력합니다 (statusline·스크립트용)
+    /// Print JSON, for statuslines and scripts
     #[arg(short = 'j', long, conflicts_with_all = ["watch", "interval"])]
     pub json: bool,
 
-    /// 로컬 캐시를 건너뛰고 직접 조회합니다
+    /// Skip the local cache and fetch live
     #[arg(long)]
     pub live: bool,
 
-    /// 색을 사용하지 않습니다
+    /// Disable colour
     #[arg(long)]
     pub no_color: bool,
 }

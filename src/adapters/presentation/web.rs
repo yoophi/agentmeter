@@ -565,7 +565,7 @@ mod tests {
                 .origin
                 .as_ref()
                 .unwrap()
-                .contains("갱신 실패")
+                .contains("refresh failed")
         );
         assert!(
             dashboard.panes[0]

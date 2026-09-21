@@ -17,8 +17,9 @@ impl FileSettingsRepository {
     pub(crate) fn path(&self) -> Result<PathBuf> {
         let base = match std::env::var_os("XDG_CONFIG_HOME") {
             Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
-            _ => PathBuf::from(std::env::var_os("HOME").context("HOME 환경변수가 없습니다")?)
-                .join(".config"),
+            _ => {
+                PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config")
+            }
         };
         Ok(base.join(DIR).join(FILE))
     }
@@ -36,30 +37,31 @@ impl SettingsRepository for FileSettingsRepository {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
-                return Err(error).with_context(|| format!("{} 를 열 수 없습니다", path.display()));
+                return Err(error).with_context(|| format!("could not open {}", path.display()));
             }
         };
-        parse(&raw).with_context(|| format!("{} 를 읽을 수 없습니다", path.display()))
+        parse(&raw).with_context(|| format!("could not read {}", path.display()))
     }
 
     fn save(&self, settings: &Settings) -> Result<()> {
         let path = self.path()?;
         if let Some(directory) = path.parent() {
             std::fs::create_dir_all(directory)
-                .with_context(|| format!("{} 를 만들 수 없습니다", directory.display()))?;
+                .with_context(|| format!("could not create {}", directory.display()))?;
         }
         let stored = StoredSettings {
             agents: Some(settings.agents.clone()),
         };
-        let body = toml::to_string_pretty(&stored).context("설정을 TOML 로 만들 수 없습니다")?;
+        let body = toml::to_string_pretty(&stored)
+            .context("could not render the configuration as TOML")?;
         std::fs::write(&path, body)
-            .with_context(|| format!("{} 에 쓸 수 없습니다", path.display()))?;
+            .with_context(|| format!("could not write to {}", path.display()))?;
         Ok(())
     }
 }
 
 fn parse(raw: &str) -> Result<Option<Settings>> {
-    let stored: StoredSettings = toml::from_str(raw).context("TOML 파싱 실패")?;
+    let stored: StoredSettings = toml::from_str(raw).context("could not parse the TOML")?;
     Ok(stored.agents.map(|agents| Settings { agents }))
 }
 

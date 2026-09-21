@@ -145,26 +145,26 @@ fn format_amount(value: f64) -> String {
 
 pub(crate) fn origin_text(origin: Origin, now: DateTime<Local>) -> String {
     let source = match origin.kind {
-        OriginKind::Cache => "로컬 캐시",
-        OriginKind::Live => "직접 조회",
+        OriginKind::Cache => "local cache",
+        OriginKind::Live => "live fetch",
     };
     let mut text = format!(
-        "기준 {} ({}, {source})",
+        "as of {} ({}, {source})",
         origin.at.format("%H:%M"),
         humanize_age(origin.age_seconds(now))
     );
     if origin.refresh_failed {
-        text.push_str(" · 갱신 실패");
+        text.push_str(" · refresh failed");
     }
     text
 }
 
 fn humanize_age(seconds: i64) -> String {
     match seconds {
-        value if value < 60 => "방금".to_string(),
-        value if value < 3600 => format!("{}분 전", value / 60),
-        value if value < 86400 => format!("{}시간 전", value / 3600),
-        value => format!("{}일 전", value / 86400),
+        value if value < 60 => "just now".to_string(),
+        value if value < 3600 => format!("{}m ago", value / 60),
+        value if value < 86400 => format!("{}h ago", value / 3600),
+        value => format!("{}d ago", value / 86400),
     }
 }
 
@@ -283,7 +283,7 @@ mod tests {
         let origin = Origin::cache(now() - TimeDelta::minutes(3), true);
         assert_eq!(
             origin_text(origin, now()),
-            "기준 20:57 (3분 전, 로컬 캐시) · 갱신 실패"
+            "as of 20:57 (3m ago, local cache) · refresh failed"
         );
     }
 

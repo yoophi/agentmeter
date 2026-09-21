@@ -124,7 +124,7 @@
       header { align-items: flex-start; flex-direction: column; gap: 4px; }
       .actions { justify-content: flex-start; }
     }
-    /* 1240px에서 shell 1204px, gap 제외 pane당 약 369px를 확보한다. */
+    /* At 1240px the shell is 1204px, leaving about 369px per pane after the gaps. */
     @media (min-width: 1240px) {
       #panes[data-pane-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
@@ -139,7 +139,7 @@
   </style>
 </head>
 <body>
-  <button class="chrome-toggle" id="chrome-toggle" type="button" aria-label="상단과 하단 영역 숨기기" title="상단과 하단 영역 숨기기">
+  <button class="chrome-toggle" id="chrome-toggle" type="button" aria-label="Hide header and footer" title="Hide header and footer">
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M2.5 10s2.8-4.5 7.5-4.5 7.5 4.5 7.5 4.5-2.8 4.5-7.5 4.5S2.5 10 2.5 10Z"></path>
       <circle cx="10" cy="10" r="2.2"></circle>
@@ -207,7 +207,7 @@
 
     function toggleChrome() {
       const hidden = document.body.classList.toggle('chrome-hidden');
-      const label = hidden ? '상단과 하단 영역 보이기' : '상단과 하단 영역 숨기기';
+      const label = hidden ? 'Show header and footer' : 'Hide header and footer';
       chromeToggle.setAttribute('aria-label', label);
       chromeToggle.title = label;
     }

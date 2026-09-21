@@ -24,6 +24,21 @@ const PANE_GAP: u16 = 2;
 const RIGHT_MARGIN: u16 = 2;
 const HISTORY_CHART_HEIGHT: usize = 3;
 
+/// 한 구획이 내용을 자르지 않고 담으려면 필요한 폭.
+///
+/// 가장 긴 줄은 `  Resets Sep 16 at 1:00am (Asia/Seoul)` 같은 각주(38칸)다.
+/// 이보다 좁아지면 리셋 시각의 타임존이 잘려서 화면이 깨진 것처럼 보인다.
+const MIN_PANE_WIDTH: u16 = 42;
+
+/// 구획 사이 세로 여백.
+const PANE_ROW_GAP: u16 = 1;
+
+/// 한 구획이 한도 두 개는 담아야 접는 보람이 있는 높이.
+///
+/// 이보다 낮아지면 가로로 좁은 것보다 세로로 잘리는 쪽이 더 나빠서, 접지 않고
+/// 예전처럼 한 줄에 늘어놓는다.
+const MIN_PANE_HEIGHT: u16 = 16;
+
 fn rows_for(meter: &Meter, has_chart: bool) -> usize {
     2 + usize::from(meter.time.is_some())
         + if has_chart { HISTORY_CHART_HEIGHT } else { 0 }
@@ -152,7 +167,7 @@ fn draw_header(frame: &mut Frame, area: Rect, screen: &Screen) {
     ])];
     if let Some(address) = screen.web {
         lines.push(Line::from(vec![
-            Span::styled(" web 서버 실행 중", Style::default().fg(Color::DarkGray)),
+            Span::styled(" web server running", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("  {address}"),
                 Style::default()
@@ -164,16 +179,43 @@ fn draw_header(frame: &mut Frame, area: Rect, screen: &Screen) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// 폭이 허락하는 만큼만 좌우로 나눈다.
+///
+/// 구획 수만큼 무조건 쪼개면 provider 가 늘어날수록 한 칸이 좁아져 각주가 잘린다.
+/// 열 수를 폭으로 정하고, 남는 구획은 아래 행으로 넘긴다. 행이 여러 개가 되면
+/// 열 수를 다시 고르게 나눠 마지막 행만 휑하게 비지 않도록 한다.
+fn pane_grid(count: usize, width: u16, height: u16) -> (usize, usize) {
+    let count = count.max(1);
+    let fits = ((width + PANE_GAP) / (MIN_PANE_WIDTH + PANE_GAP)).max(1) as usize;
+    let columns = count.min(fits);
+    let rows = count.div_ceil(columns);
+
+    // 접었을 때 각 행이 너무 낮으면 가로 잘림보다 세로 잘림이 더 크다.
+    let row_height = (height + PANE_ROW_GAP) / rows.max(1) as u16;
+    if rows > 1 && row_height < MIN_PANE_HEIGHT + PANE_ROW_GAP {
+        return (count, 1);
+    }
+    (count.div_ceil(rows), rows)
+}
+
 fn draw_panes(frame: &mut Frame, area: Rect, screen: &Screen) {
     let panes = screen.state.watch.panes();
-    let count = panes.len().max(1);
-    let columns: Vec<Constraint> = (0..count)
-        .map(|_| Constraint::Ratio(1, count as u32))
-        .collect();
-    let slots = Layout::horizontal(columns).spacing(PANE_GAP).split(area);
+    let (columns, rows) = pane_grid(panes.len(), area.width, area.height);
 
-    for (pane, slot) in panes.iter().zip(slots.iter()) {
-        draw_pane(frame, *slot, pane, screen);
+    let row_slots = Layout::vertical((0..rows).map(|_| Constraint::Ratio(1, rows as u32)))
+        .spacing(PANE_ROW_GAP)
+        .split(area);
+
+    for (row, row_area) in row_slots.iter().enumerate() {
+        let slots = Layout::horizontal((0..columns).map(|_| Constraint::Ratio(1, columns as u32)))
+            .spacing(PANE_GAP)
+            .split(*row_area);
+        for (column, slot) in slots.iter().enumerate() {
+            let Some(pane) = panes.get(row * columns + column) else {
+                break;
+            };
+            draw_pane(frame, *slot, pane, screen);
+        }
     }
 }
 
@@ -213,9 +255,9 @@ fn draw_pane(frame: &mut Frame, area: Rect, pane: &WatchPane, screen: &Screen) {
             )),
             None => Line::from(Span::styled(
                 if pane.snapshot.is_some() {
-                    "  표시할 사용량 구간이 없습니다"
+                    "  No usage windows to show"
                 } else {
-                    "  불러오는 중…"
+                    "  Loading..."
                 },
                 Style::default().fg(Color::DarkGray),
             )),
@@ -363,15 +405,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, screen: &Screen) {
         parts.push(model::origin_text(origin, now));
     }
     if let Some(seconds) = screen.state.seconds_until_refresh(now) {
-        parts.push(format!("다음 {seconds}초"));
+        parts.push(format!("next in {seconds}s"));
     }
     let controls = if panes
         .iter()
         .any(|pane| matches!(pane.agent.name, "claude" | "kiro"))
     {
-        "[r] 새로고침  [R] 직접 조회  [q] 종료"
+        "[r] refresh  [R] live fetch  [q] quit"
     } else {
-        "[r] 새로고침  [q] 종료"
+        "[r] refresh  [q] quit"
     };
     parts.push(controls.to_string());
 
@@ -390,7 +432,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, screen: &Screen) {
         .collect();
     if !errors.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!(" 갱신 실패: {}", errors.join(" · ")),
+            format!(" refresh failed: {}", errors.join(" · ")),
             Style::default().fg(color_for(Severity::Critical)),
         )));
     }
@@ -551,9 +593,11 @@ mod tests {
         let mut state = state_with(&["claude"], false);
         state.watch.apply(vec![AgentResult {
             agent: info("claude"),
-            result: Err(FetchError::Other(anyhow::anyhow!("재인증 필요"))),
+            result: Err(FetchError::Other(anyhow::anyhow!(
+                "re-authentication required"
+            ))),
         }]);
-        assert!(render(&state, 60, 24).contains("재인증 필요"));
+        assert!(render(&state, 60, 24).contains("re-authentication required"));
     }
 
     #[test]
@@ -565,7 +609,7 @@ mod tests {
         }]);
         let output = render(&state, 60, 24);
         assert!(output.contains("Current session"));
-        assert!(output.contains("갱신 실패"));
+        assert!(output.contains("refresh failed"));
         assert!(output.contains("HTTP 429"));
     }
 
@@ -594,6 +638,53 @@ mod tests {
         assert!(render(&state_of(watch), 80, 30).contains('·'));
     }
 
+    /// 폭이 모자라면 열을 줄이고 행을 늘린다. 152칸에 4구획이 이 화면의 사례다.
+    #[test]
+    fn panes_wrap_instead_of_getting_too_narrow() {
+        // 152x71 터미널의 본문 크기(오른쪽 여백과 머리말·꼬리말 제외).
+        assert_eq!(pane_grid(4, 150, 68), (2, 2), "4구획은 2x2 로 접혀야 함");
+        assert_eq!(
+            pane_grid(3, 150, 68),
+            (3, 1),
+            "3구획은 48칸씩이라 한 줄에 들어감"
+        );
+        assert_eq!(pane_grid(2, 150, 68), (2, 1));
+        assert_eq!(pane_grid(1, 150, 68), (1, 1));
+        // 아주 좁으면 한 열로 쌓는다.
+        assert_eq!(pane_grid(4, 60, 68), (1, 4));
+        // 넓으면 그대로 나란히.
+        assert_eq!(pane_grid(4, 400, 68), (4, 1));
+    }
+
+    /// 세로가 모자라면 접지 않는다. 가로로 좁은 것보다 세로로 잘리는 쪽이 더 나쁘다.
+    #[test]
+    fn a_short_terminal_keeps_panes_on_one_row() {
+        assert_eq!(pane_grid(4, 150, 20), (4, 1), "낮은 화면은 예전처럼 한 줄");
+        assert_eq!(pane_grid(4, 60, 20), (4, 1));
+        // 높이가 충분해지면 다시 접는다.
+        assert_eq!(pane_grid(4, 150, 34), (2, 2));
+    }
+
+    /// 접힌 뒤에는 각주가 잘리지 않아야 한다.
+    #[test]
+    fn a_folded_pane_keeps_the_reset_footnote_whole() {
+        let state = state_with(&["claude", "codex", "glm", "kiro"], true);
+        let screen = Screen {
+            prog: "agentmeter",
+            timezone: "Asia/Seoul",
+            web: None,
+            label_panes: true,
+            state: &state,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(152, 71)).unwrap();
+        terminal.draw(|frame| draw(frame, &screen)).unwrap();
+        let output = text(terminal.backend().buffer());
+        assert!(
+            output.contains("(Asia/Seoul)"),
+            "타임존이 잘리지 않아야 함:\n{output}"
+        );
+    }
+
     #[test]
     fn refresh_keys_choose_cached_or_fresh_policy() {
         assert_eq!(refresh_request(KeyCode::Char('r')), Some(false));
@@ -602,8 +693,8 @@ mod tests {
 
     #[test]
     fn cached_providers_advertise_direct_refresh() {
-        assert!(render(&state_with(&["claude"], true), 100, 30).contains("[R] 직접 조회"));
-        assert!(render(&state_with(&["kiro"], true), 100, 30).contains("[R] 직접 조회"));
+        assert!(render(&state_with(&["claude"], true), 100, 30).contains("[R] live fetch"));
+        assert!(render(&state_with(&["kiro"], true), 100, 30).contains("[R] live fetch"));
     }
 
     #[test]
@@ -612,7 +703,7 @@ mod tests {
         let output = render_web(&state, Some("http://127.0.0.1:54321"), 80, 30);
         let banner = output
             .lines()
-            .find(|line| line.contains("web 서버 실행 중"))
+            .find(|line| line.contains("web server running"))
             .expect("웹 배너가 상단에 있어야 함");
         assert!(banner.contains("http://127.0.0.1:54321"), "{banner}");
         let rows: Vec<&str> = output.lines().collect();
@@ -624,7 +715,7 @@ mod tests {
     fn without_a_server_the_header_keeps_its_original_height() {
         let state = state_with(&["claude"], true);
         let plain = render(&state, 80, 30);
-        assert!(!plain.contains("web 서버"));
+        assert!(!plain.contains("web server"));
         let first_meter = plain
             .lines()
             .position(|line| line.contains("Current session"))
@@ -644,7 +735,7 @@ mod tests {
         state.next_refresh_at =
             Some(Local::now() + TimeDelta::seconds(42) + TimeDelta::milliseconds(900));
         let output = render(&state, 100, 30);
-        assert!(output.contains("다음 42초"), "{output}");
+        assert!(output.contains("next in 42s"), "{output}");
     }
     #[test]
     fn credits_survive_refresh_failure_and_render_without_windows() {
@@ -665,7 +756,7 @@ mod tests {
         let output = render(&state, 100, 24);
         assert!(output.contains("Reset credits: 2"), "{output}");
         assert!(output.contains("Known expiry:"), "{output}");
-        assert!(output.contains("갱신 실패"));
+        assert!(output.contains("refresh failed"));
         assert!(output.contains("offline"));
         for width in [10, 30, 60] {
             for height in [3, 5, 12] {

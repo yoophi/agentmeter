@@ -25,20 +25,18 @@ pub(super) fn fetch() -> Result<String, FetchError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| {
-            format!("`{bin}`를 실행할 수 없습니다. Kiro CLI가 설치되어 있는지 확인하세요")
-        })
+        .with_context(|| format!("could not run `{bin}`. check that the Kiro CLI is installed"))
         .map_err(FetchError::Other)?;
 
     let stdout = child
         .stdout
         .take()
-        .context("Kiro CLI stdout을 열 수 없습니다")
+        .context("could not open the Kiro CLI stdout")
         .map_err(FetchError::Other)?;
     let stderr = child
         .stderr
         .take()
-        .context("Kiro CLI stderr를 열 수 없습니다")
+        .context("could not open the Kiro CLI stderr")
         .map_err(FetchError::Other)?;
     let stdout = thread::spawn(move || read(stdout));
     let stderr = thread::spawn(move || read(stderr));
@@ -57,7 +55,7 @@ pub(super) fn fetch() -> Result<String, FetchError> {
                 let _ = stdout.join();
                 let _ = stderr.join();
                 return Err(FetchError::Other(anyhow!(
-                    "Kiro CLI가 {}초 안에 응답하지 않았습니다",
+                    "the Kiro CLI did not answer within {}s",
                     TIMEOUT.as_secs()
                 )));
             }
@@ -76,12 +74,12 @@ pub(super) fn fetch() -> Result<String, FetchError> {
         || lower.contains("authenticate")
     {
         return Err(FetchError::Unauthorized(format!(
-            "Kiro CLI 로그인이 필요합니다 — `kiro-cli login`으로 로그인하세요: {}",
+            "the Kiro CLI needs a sign-in — run `kiro-cli login`: {}",
             combined.trim()
         )));
     }
     Err(FetchError::Other(anyhow!(
-        "Kiro CLI가 종료 코드 {}를 반환했습니다: {}",
+        "the Kiro CLI exited with code {}: {}",
         status
             .code()
             .map_or_else(|| "unknown".into(), |code| code.to_string()),

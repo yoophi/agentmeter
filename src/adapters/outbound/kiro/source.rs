@@ -34,10 +34,12 @@ impl UsageSource for KiroUsageSource {
 
         let fetched = (|| {
             let raw = client::fetch()?;
-            let usage = model::parse(&raw)
-                .map_err(|error| FetchError::Other(error.context("Kiro usage 출력 파싱 실패")))?;
-            model::to_limit(&usage)
-                .map_err(|error| FetchError::Other(error.context("Kiro usage 변환 실패")))
+            let usage = model::parse(&raw).map_err(|error| {
+                FetchError::Other(error.context("could not parse the Kiro usage output"))
+            })?;
+            model::to_limit(&usage).map_err(|error| {
+                FetchError::Other(error.context("could not convert the Kiro usage"))
+            })
         })();
         let limit = match fetched {
             Ok(limit) => limit,

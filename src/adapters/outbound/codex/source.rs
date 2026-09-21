@@ -166,7 +166,7 @@ exec sleep 5
         set_mode("exit");
 
         let error = CodexUsageSource.fetch(FetchPolicy::Fresh).unwrap_err();
-        assert!(error.to_string().contains("응답을 마치기 전에 종료"));
+        assert!(error.to_string().contains("exited before finishing"));
     }
 
     #[test]
@@ -176,7 +176,7 @@ exec sleep 5
         set_mode("timeout");
 
         let error = CodexUsageSource.fetch(FetchPolicy::Fresh).unwrap_err();
-        assert!(error.to_string().contains("안에 응답하지 않았습니다"));
+        assert!(error.to_string().contains("did not answer within"));
         assert!(!process_exists(&fake.pid()));
     }
     #[test]
@@ -185,7 +185,7 @@ exec sleep 5
         let fake = FakeCodex::install();
         for (mode, message) in [
             ("init_error", "initialization rejected"),
-            ("invalid_init", "result가 없습니다"),
+            ("invalid_init", "has no result"),
         ] {
             set_mode(mode);
             let error = CodexUsageSource.fetch(FetchPolicy::Fresh).unwrap_err();

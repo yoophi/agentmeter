@@ -19,14 +19,14 @@ pub(super) fn parse(raw: &str) -> anyhow::Result<KiroUsage> {
     let header = text
         .lines()
         .find(|line| line.contains("Estimated Usage") && line.contains("resets on"))
-        .context("Estimated Usage 헤더가 없습니다")?;
+        .context("no Estimated Usage header")?;
     let mut reset_date = None;
     let mut plan = None;
     for part in header.split('|').map(str::trim) {
         if let Some(value) = part.strip_prefix("resets on ") {
             reset_date = Some(
                 NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
-                    .context("reset 날짜 형식이 올바르지 않습니다")?,
+                    .context("the reset date has an unexpected format")?,
             );
         } else if !part.contains("Estimated Usage") && !part.is_empty() {
             plan = Some(part.to_string());
@@ -36,23 +36,23 @@ pub(super) fn parse(raw: &str) -> anyhow::Result<KiroUsage> {
     let credits = text
         .lines()
         .find(|line| line.trim_start().starts_with("Credits"))
-        .context("Credits 행이 없습니다")?;
+        .context("no Credits row")?;
     let inside = credits
         .split_once('(')
         .and_then(|(_, rest)| rest.split_once(')'))
         .map(|(inside, _)| inside)
-        .context("Credits 사용량 괄호를 읽을 수 없습니다")?;
+        .context("could not read the Credits usage parentheses")?;
     let (used, limit_and_suffix) = inside
         .split_once(" of ")
-        .context("Credits 사용량 구분자 `of`가 없습니다")?;
+        .context("the Credits usage has no `of` separator")?;
     let limit = limit_and_suffix
         .split_whitespace()
         .next()
-        .context("Credit 한도가 없습니다")?;
+        .context("no Credit limit")?;
     let used = number(used)?;
     let limit = number(limit)?;
     if limit <= 0.0 {
-        bail!("Credit 한도는 0보다 커야 합니다");
+        bail!("the Credit limit must be greater than 0");
     }
 
     let overage_enabled = text.lines().find_map(|line| {
@@ -67,10 +67,10 @@ pub(super) fn parse(raw: &str) -> anyhow::Result<KiroUsage> {
     });
 
     Ok(KiroUsage {
-        plan: plan.context("Kiro plan 이름이 없습니다")?,
+        plan: plan.context("no Kiro plan name")?,
         used,
         limit,
-        reset_date: reset_date.context("reset 날짜가 없습니다")?,
+        reset_date: reset_date.context("no reset date")?,
         overage_enabled,
     })
 }
@@ -80,15 +80,15 @@ fn number(value: &str) -> anyhow::Result<f64> {
         .trim()
         .replace(',', "")
         .parse()
-        .map_err(|_| anyhow!("숫자를 읽을 수 없습니다: {value}"))
+        .map_err(|_| anyhow!("could not read the number: {value}"))
 }
 
 pub(super) fn to_limit(usage: &KiroUsage) -> anyhow::Result<UsageLimit> {
-    let reset =
-        local_midnight(usage.reset_date).context("reset 날짜를 현지 시각으로 바꿀 수 없습니다")?;
+    let reset = local_midnight(usage.reset_date)
+        .context("could not convert the reset date to local time")?;
     let previous = previous_month(usage.reset_date)?;
-    let started =
-        local_midnight(previous).context("이전 reset 날짜를 현지 시각으로 바꿀 수 없습니다")?;
+    let started = local_midnight(previous)
+        .context("could not convert the previous reset date to local time")?;
     let percent = usage.used / usage.limit * 100.0;
     Ok(UsageLimit::new(
         "monthly:credits",
@@ -118,7 +118,7 @@ fn previous_month(date: NaiveDate) -> anyhow::Result<NaiveDate> {
     } else {
         (date.year(), date.month() - 1)
     };
-    NaiveDate::from_ymd_opt(year, month, 1).context("이전 구독 월을 계산할 수 없습니다")
+    NaiveDate::from_ymd_opt(year, month, 1).context("could not work out the previous billing month")
 }
 
 /// 터미널 스타일(CSI/OSC)을 제거해 사람이 보는 출력과 같은 문자열로 만든다.
