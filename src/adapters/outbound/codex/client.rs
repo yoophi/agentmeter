@@ -48,9 +48,7 @@ fn spawn() -> anyhow::Result<Child> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| {
-            format!(
-                "`{bin} app-server` 를 실행할 수 없습니다. Codex CLI 가 설치되어 있는지 확인하세요"
-            )
+            format!("could not run `{bin} app-server`. check that the Codex CLI is installed")
         })
 }
 
@@ -58,11 +56,11 @@ fn talk(child: &mut Child) -> Result<RateLimitsResponse, FetchError> {
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| FetchError::Other(anyhow!("app-server stdin 을 열 수 없습니다")))?;
+        .ok_or_else(|| FetchError::Other(anyhow!("could not open the app-server stdin")))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| FetchError::Other(anyhow!("app-server stdout 을 열 수 없습니다")))?;
+        .ok_or_else(|| FetchError::Other(anyhow!("could not open the app-server stdout")))?;
 
     // 읽기는 별도 스레드에서. 응답이 오지 않을 때 영원히 매달리지 않도록
     // 메인은 채널을 마감 시각까지만 기다린다.
@@ -83,7 +81,7 @@ fn talk(child: &mut Child) -> Result<RateLimitsResponse, FetchError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(FetchError::Other(anyhow!(
-                "app-server 가 {}초 안에 응답하지 않았습니다",
+                "the app-server did not answer within {}s",
                 TIMEOUT.as_secs()
             )));
         }
@@ -91,13 +89,13 @@ fn talk(child: &mut Child) -> Result<RateLimitsResponse, FetchError> {
             Ok(line) => line,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 return Err(FetchError::Other(anyhow!(
-                    "app-server 가 {}초 안에 응답하지 않았습니다",
+                    "the app-server did not answer within {}s",
                     TIMEOUT.as_secs()
                 )));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(FetchError::Other(anyhow!(
-                    "app-server 가 응답을 마치기 전에 종료되었습니다"
+                    "the app-server exited before finishing its answer"
                 )));
             }
         };
@@ -121,7 +119,7 @@ fn send(writer: &mut impl Write, message: &str) -> Result<(), FetchError> {
         .write_all(message.as_bytes())
         .and_then(|()| writer.write_all(b"\n"))
         .and_then(|()| writer.flush())
-        .context("app-server 로 요청을 보내지 못했습니다")
+        .context("could not send the request to the app-server")
         .map_err(FetchError::Other)
 }
 
@@ -146,7 +144,7 @@ fn take_response(line: &str) -> Option<Result<RateLimitsResponse, FetchError>> {
     response_result(line, REQUEST_ID).map(|result| {
         result.and_then(|value| {
             serde_json::from_value(value)
-                .context("rateLimits 응답 파싱 실패")
+                .context("could not parse the rateLimits response")
                 .map_err(FetchError::Other)
         })
     })
@@ -161,19 +159,19 @@ fn response_result(line: &str, expected_id: i64) -> Option<Result<Value, FetchEr
         let msg = err
             .get("message")
             .and_then(Value::as_str)
-            .unwrap_or("알 수 없는 오류")
+            .unwrap_or("unknown error")
             .to_string();
         let lower = msg.to_lowercase();
         if lower.contains("auth") || lower.contains("login") || lower.contains("unauthorized") {
             return Some(Err(FetchError::Unauthorized(format!(
-                "{msg} — `codex login` 으로 로그인하세요"
+                "{msg} — sign in with `codex login`"
             ))));
         }
-        return Some(Err(FetchError::Other(anyhow!("app-server 오류: {msg}"))));
+        return Some(Err(FetchError::Other(anyhow!("app-server error: {msg}"))));
     }
     Some(v.get_mut("result").map(Value::take).ok_or_else(|| {
         FetchError::Other(anyhow!(
-            "app-server 응답에 result가 없습니다 (id={expected_id})"
+            "the app-server response has no result (id={expected_id})"
         ))
     }))
 }

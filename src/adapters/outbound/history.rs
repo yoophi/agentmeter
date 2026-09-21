@@ -127,13 +127,13 @@ impl FileHistoryRepository {
         };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("{} 생성 실패", parent.display()))?;
+                .with_context(|| format!("could not create {}", parent.display()))?;
         }
         let mut connection =
-            Connection::open(path).with_context(|| format!("{} 열기 실패", path.display()))?;
+            Connection::open(path).with_context(|| format!("could not open {}", path.display()))?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
-            .context("SQLite busy timeout 설정 실패")?;
+            .context("could not set the SQLite busy timeout")?;
         initialize(&connection)?;
         let warnings = self.migrate_legacy(&mut connection, provider)?;
         Ok(Some((connection, warnings)))
@@ -151,7 +151,7 @@ impl FileHistoryRepository {
                 |_| Ok(()),
             )
             .optional()
-            .context("legacy migration 상태 조회 실패")?
+            .context("could not read the legacy migration state")?
             .is_some();
         if completed {
             return Ok(Vec::new());
@@ -163,7 +163,7 @@ impl FileHistoryRepository {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
-                return Ok(vec![format!("{} 읽기 실패: {error}", root.display())]);
+                return Ok(vec![format!("could not read {}: {error}", root.display())]);
             }
         };
         let prefix = format!("{}__", safe_provider(provider));
@@ -192,7 +192,7 @@ impl FileHistoryRepository {
                     |_| Ok(()),
                 )
                 .optional()
-                .context("legacy import 상태 조회 실패")?
+                .context("could not read the legacy import state")?
                 .is_some();
             if imported {
                 continue;
@@ -200,32 +200,32 @@ impl FileHistoryRepository {
             let raw = match std::fs::read_to_string(&path) {
                 Ok(raw) => raw,
                 Err(error) => {
-                    warnings.push(format!("{} 읽기 실패: {error}", path.display()));
+                    warnings.push(format!("could not read {}: {error}", path.display()));
                     continue;
                 }
             };
             let file = match serde_json::from_str::<HistoryFile>(&raw) {
                 Ok(file) => file,
                 Err(error) => {
-                    warnings.push(format!("{} 파싱 실패: {error}", path.display()));
+                    warnings.push(format!("could not parse {}: {error}", path.display()));
                     continue;
                 }
             };
             if file.version != FILE_VERSION {
                 warnings.push(format!(
-                    "{} 지원하지 않는 version {}",
+                    "{} has an unsupported version {}",
                     path.display(),
                     file.version
                 ));
                 continue;
             }
             if file.window.to_window().is_none() {
-                warnings.push(format!("{} window 값이 올바르지 않음", path.display()));
+                warnings.push(format!("{} has an invalid window", path.display()));
                 continue;
             }
             let transaction = connection
                 .transaction()
-                .context("legacy history import transaction 시작 실패")?;
+                .context("could not begin the legacy history import transaction")?;
             store_window(
                 &transaction,
                 provider,
@@ -240,7 +240,7 @@ impl FileHistoryRepository {
             )?;
             transaction
                 .commit()
-                .context("legacy history import commit 실패")?;
+                .context("could not commit the legacy history import")?;
         }
         if warnings.is_empty() {
             connection.execute(
@@ -344,7 +344,7 @@ fn initialize(connection: &Connection) -> anyhow::Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > DATABASE_VERSION {
         bail!(
-            "history database version {version}은 이 agentmeter가 지원하는 {DATABASE_VERSION}보다 새 버전입니다"
+            "history database version {version} is newer than the {DATABASE_VERSION} this agentmeter supports"
         );
     }
     connection.execute_batch(
@@ -1287,9 +1287,9 @@ mod tests {
             pane.error
                 .as_deref()
                 .unwrap()
-                .contains("히스토리 부분 복원")
+                .contains("history partially restored")
         );
-        assert!(pane.error.as_deref().unwrap().contains("파싱 실패"));
+        assert!(pane.error.as_deref().unwrap().contains("could not parse"));
         let _ = std::fs::remove_dir_all(root);
     }
 

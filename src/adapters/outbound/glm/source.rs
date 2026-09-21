@@ -73,11 +73,11 @@ impl GlmUsageSource {
         let envelope = client::fetch()?;
         let data = envelope
             .data
-            .ok_or_else(|| FetchError::Other(anyhow::anyhow!("응답에 data 가 없습니다")))?;
+            .ok_or_else(|| FetchError::Other(anyhow::anyhow!("the response has no data")))?;
         let limits = model::to_limits(&data);
         if limits.is_empty() {
             return Err(FetchError::Other(anyhow::anyhow!(
-                "아는 한도 종류가 없습니다 (스키마가 변경되었을 수 있습니다)"
+                "no known limit types (the schema may have changed)"
             )));
         }
         Ok(limits)

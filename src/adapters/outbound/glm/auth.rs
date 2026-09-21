@@ -14,8 +14,8 @@ const ENV_KEYS: [&str; 2] = ["ZAI_API_KEY", "GLM_TRACKER_ZAI_KEY"];
 const OPENCODE_PROVIDER: &str = "zai-coding-plan";
 
 pub(crate) fn hint() -> &'static str {
-    "GLM API 키를 찾지 못했습니다. ZAI_API_KEY 를 설정하거나 opencode 에 \
-     zai-coding-plan 으로 로그인하세요"
+    "no GLM API key found. set ZAI_API_KEY, or sign in to opencode as \
+     zai-coding-plan"
 }
 
 pub(crate) fn api_key() -> Result<String> {
@@ -38,12 +38,12 @@ fn opencode_auth_path() -> Option<PathBuf> {
 
 fn from_opencode() -> Result<String> {
     let Some(path) = opencode_auth_path() else {
-        bail!("HOME 을 읽을 수 없어 opencode 자격증명을 찾지 못했습니다");
+        bail!("could not read HOME, so the opencode credentials were not found");
     };
     let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("{} 를 읽을 수 없습니다", path.display()))?;
+        .with_context(|| format!("could not read {}", path.display()))?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&raw).context("opencode auth.json 파싱 실패")?;
+        serde_json::from_str(&raw).context("could not parse the opencode auth.json")?;
     let key = parsed
         .get(OPENCODE_PROVIDER)
         .and_then(|entry| entry.get("key"))
@@ -52,7 +52,7 @@ fn from_opencode() -> Result<String> {
         .filter(|key| !key.is_empty());
     match key {
         Some(key) => Ok(key.to_string()),
-        None => bail!("opencode auth.json 에 {OPENCODE_PROVIDER} 키가 없습니다"),
+        None => bail!("the opencode auth.json has no {OPENCODE_PROVIDER} key"),
     }
 }
 

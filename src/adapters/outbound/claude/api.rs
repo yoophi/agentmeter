@@ -44,7 +44,7 @@ fn fetch_with(creds: &Credentials) -> Result<UsageResponse, FetchError> {
         .header("Accept", "application/json")
         .call()
         .map_err(|e| {
-            FetchError::Other(anyhow::Error::new(e).context("usage 엔드포인트 호출 실패"))
+            FetchError::Other(anyhow::Error::new(e).context("the usage endpoint call failed"))
         })?;
 
     let status = resp.status().as_u16();
@@ -57,7 +57,7 @@ fn fetch_with(creds: &Credentials) -> Result<UsageResponse, FetchError> {
     let body = resp
         .body_mut()
         .read_to_string()
-        .context("응답 본문을 읽지 못했습니다")
+        .context("could not read the response body")
         .map_err(FetchError::Other)?;
 
     parse_body(&body).map_err(FetchError::Other)
@@ -82,18 +82,19 @@ fn status_error(status: u16, retry_after: Option<u64>) -> FetchError {
         401 | 403 => FetchError::Unauthorized(auth::reauth_hint().to_string()),
         429 => FetchError::Other(match retry_after {
             Some(secs) => {
-                anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). {secs}초 후 다시 시도하세요")
+                anyhow::anyhow!("rate limited (HTTP 429). retry in {secs}s")
             }
-            None => anyhow::anyhow!("조회가 제한되었습니다 (HTTP 429). 잠시 후 다시 시도하세요"),
+            None => anyhow::anyhow!("rate limited (HTTP 429). retry shortly"),
         }),
-        other => FetchError::Other(anyhow::anyhow!("서버가 HTTP {other} 를 반환했습니다")),
+        other => FetchError::Other(anyhow::anyhow!("the server returned HTTP {other}")),
     }
 }
 
 fn parse_body(body: &str) -> Result<UsageResponse> {
-    let parsed: UsageResponse = serde_json::from_str(body).context("usage 응답 파싱 실패")?;
+    let parsed: UsageResponse =
+        serde_json::from_str(body).context("could not parse the usage response")?;
     if parsed.limits.is_empty() {
-        bail!("응답에 limits 항목이 없습니다 (스키마가 변경되었을 수 있습니다)");
+        bail!("the response has no limits (the schema may have changed)");
     }
     Ok(parsed)
 }
@@ -184,11 +185,11 @@ mod tests {
     #[test]
     fn rate_limit_message_uses_retry_after_when_useful() {
         let with = status_error(429, Some(30)).to_string();
-        assert!(with.contains("30초 후"), "{with}");
+        assert!(with.contains("retry in 30s"), "{with}");
 
         let without = status_error(429, None).to_string();
-        assert!(without.contains("잠시 후"), "{without}");
-        assert!(!without.contains("0초"), "0 을 안내하면 안 된다: {without}");
+        assert!(without.contains("retry shortly"), "{without}");
+        assert!(!without.contains("0s"), "0 을 안내하면 안 된다: {without}");
     }
 
     #[test]

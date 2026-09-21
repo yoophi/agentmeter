@@ -48,12 +48,12 @@ pub(crate) struct UsageApplication {
 impl UsageApplication {
     pub(crate) fn new(agents: Vec<RegisteredAgent>) -> Result<Self> {
         if agents.is_empty() {
-            bail!("사용량 공급자가 하나 이상 필요합니다");
+            bail!("at least one usage provider is required");
         }
         let mut names = HashSet::new();
         for agent in &agents {
             if !names.insert(agent.info.name) {
-                bail!("에이전트 이름이 중복되었습니다: {}", agent.info.name);
+                bail!("duplicate agent name: {}", agent.info.name);
             }
         }
         Ok(Self { agents })
@@ -95,9 +95,7 @@ impl UsageApplication {
                 .map(|(agent, handle)| AgentResult {
                     agent,
                     result: handle.join().unwrap_or_else(|_| {
-                        Err(FetchError::Other(anyhow::anyhow!(
-                            "조회 중 오류가 발생했습니다"
-                        )))
+                        Err(FetchError::Other(anyhow::anyhow!("the lookup failed")))
                     }),
                 })
                 .collect()
@@ -110,7 +108,7 @@ impl UsageApplication {
             .find(|agent| agent.info.name == name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "알 수 없는 에이전트: {name}. 쓸 수 있는 이름: {}",
+                    "unknown agent: {name}. available names: {}",
                     self.names().join(", ")
                 )
             })
@@ -169,7 +167,7 @@ mod tests {
     fn one_failure_does_not_hide_other_results() {
         let application = UsageApplication::new(vec![
             agent("good", Ok(snapshot())),
-            agent("bad", Err("조회 실패")),
+            agent("bad", Err("lookup failed")),
         ])
         .unwrap();
         let panes = application
@@ -178,7 +176,7 @@ mod tests {
         assert!(panes[0].result.is_ok());
         assert_eq!(
             panes[1].result.as_ref().unwrap_err().to_string(),
-            "조회 실패"
+            "lookup failed"
         );
     }
 
@@ -186,12 +184,7 @@ mod tests {
     fn unknown_names_are_rejected_at_the_use_case_boundary() {
         let application = UsageApplication::new(vec![agent("claude", Ok(snapshot()))]).unwrap();
         let result = application.query(&["gopher".into()], FetchPolicy::PreferCached);
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("알 수 없는 에이전트")
-        );
+        assert!(result.unwrap_err().to_string().contains("unknown agent"));
     }
 
     #[test]

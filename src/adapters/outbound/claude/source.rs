@@ -73,7 +73,7 @@ impl CacheStore for FileCacheStore {
     }
 
     fn write(&self, at: DateTime<Local>, response: &UsageResponse) -> anyhow::Result<()> {
-        let path = home_path(AGENT_CACHE_REL).context("HOME 을 찾을 수 없습니다")?;
+        let path = home_path(AGENT_CACHE_REL).context("could not find HOME")?;
         write_cache_at(&path, at, response)
     }
 
@@ -158,7 +158,7 @@ impl ClaudeUsageSource {
 
         let refreshed = if self.cache.backoff_active(self.clock.system_now()) {
             Err(FetchError::Other(anyhow::anyhow!(
-                "조회가 제한되어 잠시 쉬는 중입니다. {}분 뒤 다시 시도합니다",
+                "backing off after a rate limit. retrying in {}m",
                 NEG_TTL.as_secs() / 60
             )))
         } else {
@@ -229,9 +229,9 @@ fn home_path(relative: &str) -> Option<PathBuf> {
 }
 
 fn parse_cache(raw: &str) -> anyhow::Result<(DateTime<Local>, UsageResponse)> {
-    let file: CacheFile = serde_json::from_str(raw).context("usage 캐시 파싱 실패")?;
+    let file: CacheFile = serde_json::from_str(raw).context("could not parse the usage cache")?;
     let captured_at = DateTime::parse_from_rfc3339(&file.captured_at)
-        .context("captured_at 을 읽을 수 없습니다")?
+        .context("could not read captured_at")?
         .with_timezone(&Local);
     Ok((captured_at, file.usage))
 }
@@ -245,16 +245,18 @@ fn write_cache_at(
     at: DateTime<Local>,
     response: &UsageResponse,
 ) -> anyhow::Result<()> {
-    let parent = path.parent().context("캐시 디렉터리를 찾을 수 없습니다")?;
-    std::fs::create_dir_all(parent).context("캐시 디렉터리를 만들지 못했습니다")?;
+    let parent = path
+        .parent()
+        .context("could not find the cache directory")?;
+    std::fs::create_dir_all(parent).context("could not create the cache directory")?;
     let bytes = serde_json::to_vec(&CacheFileRef {
         captured_at: at.to_rfc3339(),
         usage: response,
     })
-    .context("usage 캐시 직렬화 실패")?;
+    .context("could not serialise the usage cache")?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&temporary, bytes).context("usage 임시 캐시 저장 실패")?;
-    std::fs::rename(&temporary, path).context("usage 캐시 교체 실패")?;
+    std::fs::write(&temporary, bytes).context("could not write the temporary usage cache")?;
+    std::fs::rename(&temporary, path).context("could not replace the usage cache")?;
     Ok(())
 }
 

@@ -75,7 +75,7 @@ impl Server {
     fn join(self) -> Result<()> {
         match self.thread.join() {
             Ok(result) => result,
-            Err(_) => bail!("웹 서버 스레드가 비정상 종료했습니다"),
+            Err(_) => bail!("the web server thread exited abnormally"),
         }
     }
 }
@@ -98,7 +98,7 @@ pub(crate) fn spawn(options: Options) -> Result<Server> {
     let thread = thread::Builder::new()
         .name("agentmeter-web".into())
         .spawn(move || serve_blocking(state, host, port, signal, ready_tx))
-        .context("웹 서버 스레드를 만들 수 없습니다")?;
+        .context("could not spawn the web server thread")?;
 
     match ready_rx.recv() {
         Ok(Ok(address)) => Ok(Server {
@@ -112,7 +112,7 @@ pub(crate) fn spawn(options: Options) -> Result<Server> {
         }
         Err(_) => {
             let _ = thread.join();
-            bail!("웹 서버가 주소를 알리지 못했습니다")
+            bail!("the web server never reported its address")
         }
     }
 }
@@ -132,7 +132,7 @@ fn serve_blocking(
         Err(error) => {
             return report_startup(
                 &ready,
-                Err(anyhow::Error::new(error).context("웹 서버 런타임을 만들 수 없습니다")),
+                Err(anyhow::Error::new(error).context("could not build the web server runtime")),
             );
         }
     };
@@ -151,7 +151,7 @@ fn serve_blocking(
         axum::serve(listener, router(state))
             .with_graceful_shutdown(shutdown_signal(shutdown))
             .await
-            .context("웹 서버 실행 실패")
+            .context("the web server failed")
     });
     runtime.shutdown_timeout(SHUTDOWN_GRACE);
     served
@@ -171,14 +171,14 @@ async fn bind(host: IpAddr, port: u16) -> Result<(tokio::net::TcpListener, Socke
         .await
         .with_context(|| {
             if port == 0 {
-                format!("{host}에서 ephemeral port를 열 수 없습니다")
+                format!("could not open an ephemeral port on {host}")
             } else {
-                format!("{host}:{port} 포트를 열 수 없습니다")
+                format!("could not open the port {host}:{port}")
             }
         })?;
     let address = listener
         .local_addr()
-        .context("할당된 포트를 읽을 수 없습니다")?;
+        .context("could not read the assigned port")?;
     Ok((listener, address))
 }
 
@@ -233,7 +233,7 @@ async fn refresh(
             StatusCode::INTERNAL_SERVER_ERROR
         }
         Err(error) => {
-            state.report(&format!("조회 작업이 중단되었습니다: {error}"));
+            state.report(&format!("the lookup task was interrupted: {error}"));
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -244,7 +244,7 @@ async fn shutdown_signal(shutdown: Arc<Notify>) {
         _ = shutdown.notified() => {}
         result = tokio::signal::ctrl_c() => {
             if let Err(error) = result {
-                eprintln!("agentmeter web: 종료 신호를 기다릴 수 없습니다: {error}");
+                eprintln!("agentmeter web: could not wait for the shutdown signal: {error}");
             }
         }
     }
@@ -328,7 +328,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(
-            error.to_string().contains("포트를 열 수 없습니다"),
+            error.to_string().contains("could not open the port"),
             "{error:#}"
         );
         held.shutdown().unwrap();

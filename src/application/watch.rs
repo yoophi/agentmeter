@@ -61,7 +61,7 @@ impl WatchPane {
         if let Some(repository) = &pane.repository {
             match repository.restore_active(pane.agent.name, Local::now()) {
                 Ok(history) => pane.restore(history),
-                Err(error) => pane.error = Some(format!("히스토리 복원 실패: {error:#}")),
+                Err(error) => pane.error = Some(format!("history restore failed: {error:#}")),
             }
         }
         pane
@@ -72,7 +72,7 @@ impl WatchPane {
         self.replace_windows(restore.windows);
         if !restore.warnings.is_empty() {
             self.history_warning = Some(format!(
-                "히스토리 부분 복원: {}",
+                "history partially restored: {}",
                 restore.warnings.join(" · ")
             ));
             self.error = self.history_warning.clone();
@@ -199,7 +199,7 @@ impl WatchState {
                     let history_error = pane.record(&snapshot).err();
                     pane.snapshot = Some(snapshot);
                     pane.error = history_error
-                        .map(|error| format!("히스토리 저장 실패: {error:#}"))
+                        .map(|error| format!("history write failed: {error:#}"))
                         .or_else(|| pane.history_warning.clone());
                 }
                 Err(error) => {

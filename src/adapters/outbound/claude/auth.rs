@@ -49,39 +49,39 @@ fn read_keychain() -> Result<Option<String>> {
     let out = Command::new("security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
         .output()
-        .context("`security` 명령을 실행할 수 없습니다")?;
+        .context("could not run the `security` command")?;
 
     if !out.status.success() {
         // 항목이 없는 경우 — 파일 폴백으로 넘긴다
         return Ok(None);
     }
-    let s = String::from_utf8(out.stdout).context("Keychain 값이 UTF-8 이 아닙니다")?;
+    let s = String::from_utf8(out.stdout).context("the Keychain value is not UTF-8")?;
     let s = s.trim().to_string();
     if s.is_empty() { Ok(None) } else { Ok(Some(s)) }
 }
 
 fn read_file() -> Result<String> {
-    let home = std::env::var_os("HOME").context("HOME 환경변수가 없습니다")?;
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
     let path = std::path::Path::new(&home).join(".claude/.credentials.json");
     std::fs::read_to_string(&path).with_context(|| {
         format!(
-            "자격증명을 찾을 수 없습니다 ({}). `claude` 로 로그인했는지 확인하세요",
+            "no credentials found ({}). check that you are signed in with `claude`",
             path.display()
         )
     })
 }
 
 fn parse(raw: &str) -> Result<Credentials> {
-    let json: Value = serde_json::from_str(raw).context("자격증명 JSON 파싱 실패")?;
+    let json: Value = serde_json::from_str(raw).context("could not parse the credential JSON")?;
     let oauth = json
         .get("claudeAiOauth")
-        .context("자격증명에 claudeAiOauth 가 없습니다")?;
+        .context("the credentials have no claudeAiOauth")?;
 
     let access_token = oauth
         .get("accessToken")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .context("accessToken 이 비어 있습니다")?
+        .context("accessToken is empty")?
         .to_string();
 
     Ok(Credentials {
@@ -92,5 +92,5 @@ fn parse(raw: &str) -> Result<Credentials> {
 
 /// 만료됐을 때 사용자에게 보여줄 안내. 갱신을 시도하지 않는 이유가 여기 있다.
 pub fn reauth_hint() -> &'static str {
-    "액세스 토큰이 만료되었습니다. `claude` 를 한 번 실행하면 자동 갱신됩니다."
+    "the access token expired. run `claude` once and it refreshes automatically."
 }

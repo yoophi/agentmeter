@@ -45,7 +45,7 @@ impl SettingsApplication {
 
     fn validate(&self, settings: &Settings) -> Result<()> {
         if settings.agents.is_empty() {
-            bail!("agents 가 비어 있습니다. 예: agents = [\"claude\", \"codex\"]");
+            bail!("agents is empty. for example: agents = [\"claude\", \"codex\"]");
         }
         let unknown: Vec<&str> = settings
             .agents
@@ -55,7 +55,7 @@ impl SettingsApplication {
             .collect();
         if !unknown.is_empty() {
             bail!(
-                "알 수 없는 에이전트: {}. 쓸 수 있는 이름: {}",
+                "unknown agent: {}. available names: {}",
                 unknown.join(", "),
                 self.available.join(", ")
             );
