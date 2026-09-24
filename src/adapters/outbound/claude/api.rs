@@ -7,9 +7,12 @@ use super::auth::{self, Credentials};
 use super::model::UsageResponse;
 use crate::application::FetchError;
 
-const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
+/// `cedar_ember=1` 이어야 세션 리셋 권한 블록이 채워진다 (Claude Code 도 이렇게 부른다).
+/// `skip_spend=1` 은 쓰지 않는 `spend` 블록을 빼 달라는 뜻이다.
+const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
-const USER_AGENT: &str = concat!("agentmeter/", env!("CARGO_PKG_VERSION"));
+/// `claude --version` 을 읽지 못했을 때 쓰는 버전. 이 기능을 확인한 Claude Code 버전이다.
+const FALLBACK_CLI_VERSION: &str = "2.1.280";
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 자격증명을 매번 새로 읽어서 호출한다.
@@ -40,7 +43,10 @@ fn fetch_with(creds: &Credentials) -> Result<UsageResponse, FetchError> {
         .get(ENDPOINT)
         .header("Authorization", &format!("Bearer {}", creds.access_token))
         .header("anthropic-beta", OAUTH_BETA)
-        .header("User-Agent", USER_AGENT)
+        // 서버는 이 두 헤더로 요청 경로(surface)를 판정한다. CLI 로 보이지 않으면
+        // `cedar_ember` 가 `ineligible_reason: "surface"` 로 비어서 온다.
+        .header("User-Agent", user_agent())
+        .header("x-app", "cli")
         .header("Accept", "application/json")
         .call()
         .map_err(|e| {
@@ -61,6 +67,36 @@ fn fetch_with(creds: &Credentials) -> Result<UsageResponse, FetchError> {
         .map_err(FetchError::Other)?;
 
     parse_body(&body).map_err(FetchError::Other)
+}
+
+/// Claude Code CLI 와 같은 형태의 User-Agent. 버전은 프로세스당 한 번만 읽는다.
+fn user_agent() -> &'static str {
+    static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    UA.get_or_init(|| {
+        let version = installed_cli_version().unwrap_or_else(|| FALLBACK_CLI_VERSION.to_string());
+        format!("claude-cli/{version} (external, cli)")
+    })
+}
+
+fn installed_cli_version() -> Option<String> {
+    let out = std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_cli_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `2.1.280 (Claude Code)` → `2.1.280`
+fn parse_cli_version(raw: &str) -> Option<String> {
+    let version = raw.split_whitespace().next()?;
+    let valid = !version.is_empty()
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    valid.then(|| version.to_string())
 }
 
 /// `Retry-After` 는 초 단위. 0 이나 파싱 실패는 "값이 없음"으로 본다 —
@@ -180,6 +216,17 @@ mod tests {
             retry_after_secs(&headers(&[("retry-after", "30")])),
             Some(30)
         );
+    }
+
+    #[test]
+    fn cli_version_is_read_from_the_version_line() {
+        assert_eq!(
+            parse_cli_version("2.1.280 (Claude Code)\n").as_deref(),
+            Some("2.1.280")
+        );
+        assert_eq!(parse_cli_version(""), None);
+        assert_eq!(parse_cli_version("command not found"), None);
+        assert_eq!(parse_cli_version("2.1. (Claude Code)"), None);
     }
 
     #[test]
