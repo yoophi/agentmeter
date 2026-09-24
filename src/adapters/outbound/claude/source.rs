@@ -180,10 +180,7 @@ impl ClaudeUsageSource {
                 // Claude Code 자체 캐시가 갱신되지 않아도 방금 실측한 값은 보존한다.
                 let _ = self.cache.write(captured_at, &response);
                 self.cache.clear_backoff();
-                Ok(UsageSnapshot::live(
-                    to_limits(&response.limits),
-                    captured_at,
-                ))
+                Ok(snapshot(&response, Origin::live(captured_at)))
             }
             Err(error) => {
                 if !matches!(error, FetchError::Unauthorized(_)) {
@@ -211,7 +208,7 @@ impl ClaudeUsageSource {
 fn snapshot(response: &UsageResponse, origin: Origin) -> UsageSnapshot {
     UsageSnapshot {
         limits: to_limits(&response.limits),
-        reset_credits: None,
+        reset_credits: response.reset_credits(),
         origin,
     }
 }
